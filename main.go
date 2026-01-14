@@ -11,9 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"gocv.io/x/gocv"
-
-	"github.com/vgonkivs/love/lib/audio"
 	"github.com/vgonkivs/love/lib/capture"
 	"github.com/vgonkivs/love/lib/codec"
 	"github.com/vgonkivs/love/lib/streamer"
@@ -63,7 +60,6 @@ func printUsage() {
 	fmt.Println("  -fps int           Frames per second (default 30)")
 	fmt.Println("  -quality int       JPEG quality 1-100 (default 85)")
 	fmt.Println("  -preview           Enable local preview window")
-	fmt.Println("  -audio             Enable audio capture from microphone")
 	fmt.Println("  -samplerate int    Audio sample rate in Hz (default 44100)")
 	fmt.Println("  -node string       Celestia node URL (default http://localhost:26658)")
 	fmt.Println("  -token string      Celestia node auth token")
@@ -73,11 +69,10 @@ func printUsage() {
 	fmt.Println("  -height uint       Start block height")
 	fmt.Println("  -node string       Celestia node URL (default http://localhost:26658)")
 	fmt.Println("  -token string      Celestia node auth token")
-	fmt.Println("  -audio             Enable audio playback")
 	fmt.Println()
 	fmt.Println("Examples:")
-	fmt.Println("  love stream -audio -token <auth_token>")
-	fmt.Println("  love view -audio -namespace 0a1b2c... -height 1234567 -token <auth_token>")
+	fmt.Println("  love stream -token <auth_token>")
+	fmt.Println("  love view -namespace 0a1b2c... -height 1234567 -token <auth_token>")
 }
 
 func runStream(args []string) {
@@ -91,7 +86,6 @@ func runStream(args []string) {
 	preview := fs.Bool("preview", false, "Enable local preview window")
 
 	// Audio options
-	enableAudio := fs.Bool("audio", false, "Enable audio capture from microphone")
 	sampleRate := fs.Int("samplerate", 44100, "Audio sample rate in Hz")
 
 	// Codec options
@@ -115,7 +109,10 @@ func runStream(args []string) {
 		cancel()
 	}()
 
-	// Create components
+	// Create codec (encoder)
+	encoder := codec.NewJPEGCodec(*quality)
+
+	// Create capturer with encoder
 	captureCfg := &capture.Config{
 		DeviceID:          *cameraID,
 		Width:             *width,
@@ -123,14 +120,14 @@ func runStream(args []string) {
 		FPS:               *fps,
 		EnablePreview:     *preview,
 		PreviewWindowName: "Stream Preview (Local)",
+		AudioDeviceID:     -1, // default audio input
+		SampleRate:        *sampleRate,
+		Channels:          1, // mono
+		AudioBuffer:       1024,
 	}
-	capturer := capture.NewCapturer(captureCfg)
+	capturer := capture.NewCapturer(captureCfg, encoder)
 
-	codecCfg := &codec.Config{
-		JPEGQuality: *quality,
-	}
-	cdc := codec.NewCodec(codecCfg)
-
+	// Create streamer
 	streamerCfg := &streamer.Config{
 		NodeURL:   *nodeURL,
 		AuthToken: *authToken,
@@ -147,74 +144,24 @@ func runStream(args []string) {
 	}
 	defer str.Close()
 
-	// Create channels for pipeline
-	frameChannel := make(chan gocv.Mat, 20)
-	blobChannel := make(chan []byte, 10)
+	// Create blob channel
+	blobChannel := make(chan []byte, 100)
 
-	// Audio capture setup (if enabled)
-	var audioChannel chan audio.AudioData
-	var audioCapturer *audio.Capturer
-
-	if *enableAudio {
-		audioChannel = make(chan audio.AudioData, 50)
-		audioCfg := &audio.Config{
-			DeviceID:   -1, // default audio input
-			SampleRate: *sampleRate,
-			Channels:   1, // mono
-			BufferSize: 1024,
+	// Start streamer in goroutine
+	log.Printf("Starting streamer...")
+	go func() {
+		if err := str.Run(ctx, blobChannel); err != nil {
+			log.Printf("Streamer error: %v", err)
 		}
-		audioCapturer = audio.NewCapturer(audioCfg)
-
-		// Start audio capturer in goroutine
-		log.Printf("Starting audio capturer (sample rate: %d Hz)...", *sampleRate)
-		go func() {
-			if err := audioCapturer.Run(ctx, audioChannel); err != nil {
-				log.Printf("Audio capturer error: %v", err)
-			}
-			close(audioChannel)
-		}()
-	}
-
-	// Start pipeline components (codec and streamer in goroutines)
-	if *enableAudio {
-		log.Printf("Starting codec with audio (1MB chunks, JPEG quality %d)...", *quality)
-		go func() {
-			if err := cdc.RunWithAudio(ctx, frameChannel, audioChannel, blobChannel); err != nil {
-				log.Printf("Codec error: %v", err)
-			}
-			close(blobChannel)
-		}()
-
-		// Use async streamer for audio streams
-		log.Println("Starting async streamer...")
-		go func() {
-			if err := str.RunAsync(ctx, blobChannel, *sampleRate, 1, *fps); err != nil {
-				log.Printf("Streamer error: %v", err)
-			}
-		}()
-	} else {
-		log.Printf("Starting codec (1MB chunks, JPEG quality %d)...", *quality)
-		go func() {
-			if err := cdc.Run(ctx, frameChannel, blobChannel); err != nil {
-				log.Printf("Codec error: %v", err)
-			}
-			close(blobChannel)
-		}()
-
-		log.Println("Starting streamer...")
-		go func() {
-			if err := str.Run(ctx, blobChannel); err != nil {
-				log.Printf("Streamer error: %v", err)
-			}
-		}()
-	}
+	}()
 
 	// Run capturer on main thread (required for OpenCV GUI on macOS)
-	log.Printf("Starting capturer (camera %d, %dx%d, %dfps)...", *cameraID, *width, *height, *fps)
-	if err := capturer.Run(ctx, frameChannel); err != nil {
+	log.Printf("Starting capturer (camera %d, %dx%d, %dfps, audio %dHz)...",
+		*cameraID, *width, *height, *fps, *sampleRate)
+	if err := capturer.Run(ctx, blobChannel); err != nil {
 		log.Printf("Capturer error: %v", err)
 	}
-	close(frameChannel)
+	close(blobChannel)
 
 	log.Println("Stream ended")
 }
@@ -229,10 +176,6 @@ func runView(args []string) {
 	// Celestia options
 	nodeURL := fs.String("node", "http://localhost:26658", "Celestia node URL")
 	authToken := fs.String("token", "", "Celestia node auth token")
-
-	// Audio options
-	enableAudio := fs.Bool("audio", false, "Enable audio playback")
-	sampleRate := fs.Int("samplerate", 44100, "Audio sample rate in Hz")
 
 	fs.Parse(args)
 
@@ -259,18 +202,19 @@ func runView(args []string) {
 		cancel()
 	}()
 
-	// Create viewer
+	// Create codec (decoder)
+	decoder := codec.NewJPEGCodec(85) // quality doesn't matter for decoding
+
+	// Create viewer with decoder
 	viewerCfg := &viewer.Config{
-		NodeURL:     *nodeURL,
-		AuthToken:   *authToken,
-		BufferSize:  10,
-		WindowName:  "Celestia Live Stream",
-		PollDelay:   500 * time.Millisecond,
-		EnableAudio: *enableAudio,
-		SampleRate:  *sampleRate,
+		NodeURL:    *nodeURL,
+		AuthToken:  *authToken,
+		BufferSize: 10,
+		WindowName: "Celestia Live Stream",
+		PollDelay:  500 * time.Millisecond,
 	}
 
-	v, err := viewer.NewViewer(viewerCfg, *namespace, *startHeight)
+	v, err := viewer.NewViewer(viewerCfg, decoder, *namespace, *startHeight)
 	if err != nil {
 		log.Fatalf("Failed to create viewer: %v", err)
 	}
@@ -285,15 +229,8 @@ func runView(args []string) {
 	log.Printf("Subscribing to namespace at height %d...", *startHeight)
 	log.Println("Press ESC to exit")
 
-	if *enableAudio {
-		log.Println("Audio playback enabled")
-		if err := v.RunWithAudio(ctx); err != nil {
-			log.Printf("Viewer error: %v", err)
-		}
-	} else {
-		if err := v.Run(ctx); err != nil {
-			log.Printf("Viewer error: %v", err)
-		}
+	if err := v.Run(ctx); err != nil {
+		log.Printf("Viewer error: %v", err)
 	}
 
 	log.Println("Viewer stopped")

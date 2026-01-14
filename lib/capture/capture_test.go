@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/vgonkivs/love/lib/codec"
 )
 
 func TestNewCapturer(t *testing.T) {
@@ -14,9 +16,14 @@ func TestNewCapturer(t *testing.T) {
 		FPS:               15,
 		EnablePreview:     true,
 		PreviewWindowName: "Test Window",
+		AudioDeviceID:     -1,
+		SampleRate:        44100,
+		Channels:          1,
+		AudioBuffer:       1024,
 	}
 
-	capturer := NewCapturer(cfg)
+	encoder := codec.NewJPEGCodec(85)
+	capturer := NewCapturer(cfg, encoder)
 
 	if capturer == nil {
 		t.Fatal("expected non-nil capturer")
@@ -39,26 +46,34 @@ func TestNewCapturer(t *testing.T) {
 	if capturer.cfg.EnablePreview != true {
 		t.Error("expected EnablePreview true")
 	}
+	if capturer.cfg.SampleRate != 44100 {
+		t.Errorf("expected SampleRate 44100, got %d", capturer.cfg.SampleRate)
+	}
 }
 
 func TestCapturer_Run_InvalidDevice(t *testing.T) {
 	cfg := &Config{
-		DeviceID: 999, // Invalid device ID
-		Width:    640,
-		Height:   480,
-		FPS:      30,
+		DeviceID:      999, // Invalid device ID
+		Width:         640,
+		Height:        480,
+		FPS:           30,
+		AudioDeviceID: -1,
+		SampleRate:    44100,
+		Channels:      1,
+		AudioBuffer:   1024,
 	}
 
-	capturer := NewCapturer(cfg)
+	encoder := codec.NewJPEGCodec(85)
+	capturer := NewCapturer(cfg, encoder)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	output := make(chan interface{}, 1)
+	output := make(chan []byte, 1)
 
 	// Run should fail with invalid device
 	// Note: This behavior depends on the system - some systems may not error immediately
-	err := capturer.Run(ctx, nil)
+	err := capturer.Run(ctx, output)
 
 	// We expect an error for invalid device, but close the output channel regardless
 	close(output)
@@ -85,6 +100,10 @@ func TestConfig_Values(t *testing.T) {
 				FPS:               60,
 				EnablePreview:     true,
 				PreviewWindowName: "Custom",
+				AudioDeviceID:     -1,
+				SampleRate:        48000,
+				Channels:          2,
+				AudioBuffer:       2048,
 			},
 			expected: Config{
 				DeviceID:          2,
@@ -93,6 +112,10 @@ func TestConfig_Values(t *testing.T) {
 				FPS:               60,
 				EnablePreview:     true,
 				PreviewWindowName: "Custom",
+				AudioDeviceID:     -1,
+				SampleRate:        48000,
+				Channels:          2,
+				AudioBuffer:       2048,
 			},
 		},
 		{
@@ -104,6 +127,10 @@ func TestConfig_Values(t *testing.T) {
 				FPS:               1,
 				EnablePreview:     false,
 				PreviewWindowName: "",
+				AudioDeviceID:     -1,
+				SampleRate:        8000,
+				Channels:          1,
+				AudioBuffer:       256,
 			},
 			expected: Config{
 				DeviceID:          0,
@@ -112,6 +139,10 @@ func TestConfig_Values(t *testing.T) {
 				FPS:               1,
 				EnablePreview:     false,
 				PreviewWindowName: "",
+				AudioDeviceID:     -1,
+				SampleRate:        8000,
+				Channels:          1,
+				AudioBuffer:       256,
 			},
 		},
 	}
@@ -135,6 +166,12 @@ func TestConfig_Values(t *testing.T) {
 			}
 			if tt.cfg.PreviewWindowName != tt.expected.PreviewWindowName {
 				t.Errorf("PreviewWindowName: got %s, want %s", tt.cfg.PreviewWindowName, tt.expected.PreviewWindowName)
+			}
+			if tt.cfg.SampleRate != tt.expected.SampleRate {
+				t.Errorf("SampleRate: got %d, want %d", tt.cfg.SampleRate, tt.expected.SampleRate)
+			}
+			if tt.cfg.Channels != tt.expected.Channels {
+				t.Errorf("Channels: got %d, want %d", tt.cfg.Channels, tt.expected.Channels)
 			}
 		})
 	}

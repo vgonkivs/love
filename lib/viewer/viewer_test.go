@@ -7,18 +7,20 @@ import (
 	"time"
 
 	"github.com/celestiaorg/celestia-openrpc/types/share"
+
+	"github.com/vgonkivs/love/lib/codec"
 )
 
 func TestNewViewer(t *testing.T) {
 	cfg := &Config{
-		NodeURL:     "http://localhost:26658",
-		AuthToken:   "",
-		BufferSize:  10,
-		WindowName:  "Celestia Live Stream",
-		PollDelay:   500 * time.Millisecond,
-		EnableAudio: false,
-		SampleRate:  44100,
+		NodeURL:    "http://localhost:26658",
+		AuthToken:  "",
+		BufferSize: 10,
+		WindowName: "Celestia Live Stream",
+		PollDelay:  500 * time.Millisecond,
 	}
+
+	decoder := codec.NewJPEGCodec(85)
 
 	// Create a valid namespace hex
 	nsBytes := make([]byte, 10)
@@ -31,7 +33,7 @@ func TestNewViewer(t *testing.T) {
 	}
 	namespaceHex := hex.EncodeToString(namespace)
 
-	viewer, err := NewViewer(cfg, namespaceHex, 12345)
+	viewer, err := NewViewer(cfg, decoder, namespaceHex, 12345)
 	if err != nil {
 		t.Fatalf("failed to create viewer: %v", err)
 	}
@@ -54,8 +56,10 @@ func TestNewViewer_InvalidNamespaceHex(t *testing.T) {
 		PollDelay:  500 * time.Millisecond,
 	}
 
+	decoder := codec.NewJPEGCodec(85)
+
 	// Invalid hex string
-	_, err := NewViewer(cfg, "not-valid-hex", 12345)
+	_, err := NewViewer(cfg, decoder, "not-valid-hex", 12345)
 	if err == nil {
 		t.Error("expected error for invalid namespace hex")
 	}
@@ -68,8 +72,10 @@ func TestNewViewer_InvalidNamespace(t *testing.T) {
 		PollDelay:  500 * time.Millisecond,
 	}
 
+	decoder := codec.NewJPEGCodec(85)
+
 	// Valid hex but invalid namespace (wrong length)
-	_, err := NewViewer(cfg, "0102", 12345)
+	_, err := NewViewer(cfg, decoder, "0102", 12345)
 	if err == nil {
 		t.Error("expected error for invalid namespace")
 	}
@@ -82,11 +88,13 @@ func TestViewer_Close(t *testing.T) {
 		PollDelay:  500 * time.Millisecond,
 	}
 
+	decoder := codec.NewJPEGCodec(85)
+
 	nsBytes := make([]byte, 10)
 	namespace, _ := share.NewBlobNamespaceV0(nsBytes)
 	namespaceHex := hex.EncodeToString(namespace)
 
-	viewer, err := NewViewer(cfg, namespaceHex, 12345)
+	viewer, err := NewViewer(cfg, decoder, namespaceHex, 12345)
 	if err != nil {
 		t.Fatalf("failed to create viewer: %v", err)
 	}
@@ -105,11 +113,13 @@ func TestViewer_Run_NotConnected(t *testing.T) {
 		PollDelay:  500 * time.Millisecond,
 	}
 
+	decoder := codec.NewJPEGCodec(85)
+
 	nsBytes := make([]byte, 10)
 	namespace, _ := share.NewBlobNamespaceV0(nsBytes)
 	namespaceHex := hex.EncodeToString(namespace)
 
-	viewer, err := NewViewer(cfg, namespaceHex, 12345)
+	viewer, err := NewViewer(cfg, decoder, namespaceHex, 12345)
 	if err != nil {
 		t.Fatalf("failed to create viewer: %v", err)
 	}
@@ -130,11 +140,13 @@ func TestViewer_ClientNilBeforeConnect(t *testing.T) {
 		PollDelay:  500 * time.Millisecond,
 	}
 
+	decoder := codec.NewJPEGCodec(85)
+
 	nsBytes := make([]byte, 10)
 	namespace, _ := share.NewBlobNamespaceV0(nsBytes)
 	namespaceHex := hex.EncodeToString(namespace)
 
-	viewer, err := NewViewer(cfg, namespaceHex, 12345)
+	viewer, err := NewViewer(cfg, decoder, namespaceHex, 12345)
 	if err != nil {
 		t.Fatalf("failed to create viewer: %v", err)
 	}
@@ -178,6 +190,8 @@ func TestNewViewer_DifferentHeights(t *testing.T) {
 		PollDelay:  500 * time.Millisecond,
 	}
 
+	decoder := codec.NewJPEGCodec(85)
+
 	nsBytes := make([]byte, 10)
 	namespace, _ := share.NewBlobNamespaceV0(nsBytes)
 	namespaceHex := hex.EncodeToString(namespace)
@@ -185,7 +199,7 @@ func TestNewViewer_DifferentHeights(t *testing.T) {
 	tests := []uint64{0, 1, 100, 1000000, 18446744073709551615}
 
 	for _, height := range tests {
-		viewer, err := NewViewer(cfg, namespaceHex, height)
+		viewer, err := NewViewer(cfg, decoder, namespaceHex, height)
 		if err != nil {
 			t.Fatalf("failed to create viewer with height %d: %v", height, err)
 		}
@@ -202,11 +216,13 @@ func TestViewer_MultipleClose(t *testing.T) {
 		PollDelay:  500 * time.Millisecond,
 	}
 
+	decoder := codec.NewJPEGCodec(85)
+
 	nsBytes := make([]byte, 10)
 	namespace, _ := share.NewBlobNamespaceV0(nsBytes)
 	namespaceHex := hex.EncodeToString(namespace)
 
-	viewer, err := NewViewer(cfg, namespaceHex, 12345)
+	viewer, err := NewViewer(cfg, decoder, namespaceHex, 12345)
 	if err != nil {
 		t.Fatalf("failed to create viewer: %v", err)
 	}
@@ -230,6 +246,8 @@ func TestNewViewer_NamespacePreserved(t *testing.T) {
 		PollDelay:  500 * time.Millisecond,
 	}
 
+	decoder := codec.NewJPEGCodec(85)
+
 	// Create specific namespace bytes
 	nsBytes := make([]byte, 10)
 	for i := range nsBytes {
@@ -238,7 +256,7 @@ func TestNewViewer_NamespacePreserved(t *testing.T) {
 	namespace, _ := share.NewBlobNamespaceV0(nsBytes)
 	namespaceHex := hex.EncodeToString(namespace)
 
-	viewer, err := NewViewer(cfg, namespaceHex, 12345)
+	viewer, err := NewViewer(cfg, decoder, namespaceHex, 12345)
 	if err != nil {
 		t.Fatalf("failed to create viewer: %v", err)
 	}
@@ -256,7 +274,9 @@ func TestNewViewer_EmptyNamespaceHex(t *testing.T) {
 		PollDelay:  500 * time.Millisecond,
 	}
 
-	_, err := NewViewer(cfg, "", 12345)
+	decoder := codec.NewJPEGCodec(85)
+
+	_, err := NewViewer(cfg, decoder, "", 12345)
 	if err == nil {
 		t.Error("expected error for empty namespace hex")
 	}
@@ -271,11 +291,13 @@ func TestViewer_ConfigPreserved(t *testing.T) {
 		PollDelay:  2 * time.Second,
 	}
 
+	decoder := codec.NewJPEGCodec(85)
+
 	nsBytes := make([]byte, 10)
 	namespace, _ := share.NewBlobNamespaceV0(nsBytes)
 	namespaceHex := hex.EncodeToString(namespace)
 
-	viewer, err := NewViewer(cfg, namespaceHex, 12345)
+	viewer, err := NewViewer(cfg, decoder, namespaceHex, 12345)
 	if err != nil {
 		t.Fatalf("failed to create viewer: %v", err)
 	}

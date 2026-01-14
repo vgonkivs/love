@@ -2,32 +2,40 @@ package viewer
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"log"
-	"sort"
+	"sync"
 	"time"
 
 	client "github.com/celestiaorg/celestia-openrpc"
 	"github.com/celestiaorg/celestia-openrpc/types/share"
+	"github.com/gen2brain/malgo"
 	"gocv.io/x/gocv"
 
-	"github.com/vgonkivs/love/lib/audio"
 	"github.com/vgonkivs/love/lib/codec"
-	"github.com/vgonkivs/love/lib/streamer"
 )
 
-// Viewer subscribes to Celestia blobs and plays video in real-time
+// Viewer subscribes to Celestia blobs and plays video/audio in real-time
 type Viewer struct {
 	cfg       *Config
+	decoder   codec.Decoder
 	client    *client.Client
 	namespace share.Namespace
 	height    uint64
+
+	// Audio player state
+	audioCtx      *malgo.AllocatedContext
+	audioDevice   *malgo.Device
+	audioBuffer   []byte
+	audioBufMu    sync.Mutex
+	audioRunning  bool
+	audioMu       sync.Mutex
+	audioInitErr  error
 }
 
 // NewViewer creates a new viewer
-func NewViewer(cfg *Config, namespaceHex string, startHeight uint64) (*Viewer, error) {
+func NewViewer(cfg *Config, decoder codec.Decoder, namespaceHex string, startHeight uint64) (*Viewer, error) {
 	// Parse namespace from hex
 	nsBytes, err := hex.DecodeString(namespaceHex)
 	if err != nil {
@@ -41,6 +49,7 @@ func NewViewer(cfg *Config, namespaceHex string, startHeight uint64) (*Viewer, e
 
 	return &Viewer{
 		cfg:       cfg,
+		decoder:   decoder,
 		namespace: namespace,
 		height:    startHeight,
 	}, nil
@@ -65,78 +74,96 @@ func (v *Viewer) Close() error {
 	return nil
 }
 
-// Run starts the viewer, fetching blobs and displaying frames
+// startAudioPlayer initializes and starts audio playback
+func (v *Viewer) startAudioPlayer(sampleRate, channels int) error {
+	malgoCtx, err := malgo.InitContext(nil, malgo.ContextConfig{}, nil)
+	if err != nil {
+		return err
+	}
+	v.audioCtx = malgoCtx
+
+	deviceConfig := malgo.DefaultDeviceConfig(malgo.Playback)
+	deviceConfig.Playback.Format = malgo.FormatS16
+	deviceConfig.Playback.Channels = uint32(channels)
+	deviceConfig.SampleRate = uint32(sampleRate)
+	deviceConfig.PeriodSizeInFrames = 1024
+	deviceConfig.Alsa.NoMMap = 1
+
+	onSendFrames := func(outputSamples, inputSamples []byte, frameCount uint32) {
+		v.audioBufMu.Lock()
+		defer v.audioBufMu.Unlock()
+
+		bytesNeeded := int(frameCount) * channels * 2
+
+		if len(v.audioBuffer) >= bytesNeeded {
+			copy(outputSamples, v.audioBuffer[:bytesNeeded])
+			v.audioBuffer = v.audioBuffer[bytesNeeded:]
+		} else {
+			copy(outputSamples, v.audioBuffer)
+			for i := len(v.audioBuffer); i < bytesNeeded; i++ {
+				outputSamples[i] = 0
+			}
+			v.audioBuffer = v.audioBuffer[:0]
+		}
+	}
+
+	deviceCallbacks := malgo.DeviceCallbacks{
+		Data: onSendFrames,
+	}
+
+	device, err := malgo.InitDevice(v.audioCtx.Context, deviceConfig, deviceCallbacks)
+	if err != nil {
+		v.audioCtx.Uninit()
+		v.audioCtx.Free()
+		return err
+	}
+	v.audioDevice = device
+
+	if err := device.Start(); err != nil {
+		device.Uninit()
+		v.audioCtx.Uninit()
+		v.audioCtx.Free()
+		return err
+	}
+
+	v.audioMu.Lock()
+	v.audioRunning = true
+	v.audioMu.Unlock()
+
+	log.Printf("Viewer: audio player started (sample rate: %d Hz, channels: %d)", sampleRate, channels)
+	return nil
+}
+
+// stopAudioPlayer stops and cleans up audio playback
+func (v *Viewer) stopAudioPlayer() {
+	v.audioMu.Lock()
+	defer v.audioMu.Unlock()
+
+	if !v.audioRunning {
+		return
+	}
+
+	v.audioRunning = false
+	if v.audioDevice != nil {
+		v.audioDevice.Stop()
+		v.audioDevice.Uninit()
+	}
+	if v.audioCtx != nil {
+		v.audioCtx.Uninit()
+		v.audioCtx.Free()
+	}
+	log.Println("Viewer: audio player stopped")
+}
+
+// playAudio adds audio data to the playback buffer
+func (v *Viewer) playAudio(data []byte) {
+	v.audioBufMu.Lock()
+	defer v.audioBufMu.Unlock()
+	v.audioBuffer = append(v.audioBuffer, data...)
+}
+
+// Run starts the viewer, fetching blobs, decoding and displaying frames with audio
 func (v *Viewer) Run(ctx context.Context) error {
-	if v.client == nil {
-		return fmt.Errorf("not connected to Celestia node")
-	}
-
-	// Create display window
-	window := gocv.NewWindow(v.cfg.WindowName)
-	defer window.Close()
-
-	currentHeight := v.height
-	buffer := make([]byte, 0)
-	frameCount := 0
-
-	log.Printf("Viewer: starting playback from height %d, namespace: %s",
-		currentHeight, hex.EncodeToString(v.namespace))
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Printf("Viewer: stopping, displayed %d frames", frameCount)
-			return nil
-		default:
-		}
-
-		// Fetch blobs at current height
-		blobs, err := v.client.Blob.GetAll(ctx, currentHeight, []share.Namespace{v.namespace})
-		if err != nil {
-			// Height may not exist yet, wait and retry
-			time.Sleep(v.cfg.PollDelay)
-			continue
-		}
-
-		// Process each blob
-		for _, b := range blobs {
-			buffer = append(buffer, b.Data...)
-		}
-
-		// Decode and display frames from buffer
-		for {
-			frame, consumed := codec.DecodeNextFrame(buffer)
-			if frame == nil {
-				break
-			}
-
-			window.IMShow(*frame)
-			key := window.WaitKey(1)
-			if key == 27 { // ESC key
-				log.Println("Viewer: user closed window")
-				frame.Close()
-				return nil
-			}
-
-			frame.Close()
-			buffer = buffer[consumed:]
-			frameCount++
-		}
-
-		currentHeight++
-	}
-}
-
-// SequencedBlobData holds blob data with its sequence number
-type SequencedBlobData struct {
-	Sequence uint64
-	Data     []byte
-}
-
-// RunWithAudio starts the viewer with audio playback support
-// Uses the multiplexed stream format with audio and video frames
-// Handles sequenced blobs for proper ordering
-func (v *Viewer) RunWithAudio(ctx context.Context) error {
 	if v.client == nil {
 		return fmt.Errorf("not connected to Celestia node")
 	}
@@ -162,7 +189,7 @@ func (v *Viewer) RunWithAudio(ctx context.Context) error {
 		}
 
 		for _, b := range blobs {
-			sr, ch, f, valid := streamer.ParseEntrypointBlob(b.Data)
+			sr, ch, f, valid := v.decoder.ParseEntrypoint(b.Data)
 			if valid {
 				sampleRate = sr
 				channels = ch
@@ -186,29 +213,13 @@ func (v *Viewer) RunWithAudio(ctx context.Context) error {
 	window := gocv.NewWindow(v.cfg.WindowName)
 	defer window.Close()
 
-	// Setup audio player with detected settings
-	audioChannel := make(chan []byte, 100)
-	audioCfg := &audio.Config{
-		DeviceID:   -1,
-		SampleRate: sampleRate,
-		Channels:   channels,
-		BufferSize: 1024,
+	// Start audio player (graceful degradation if fails)
+	if err := v.startAudioPlayer(sampleRate, channels); err != nil {
+		log.Printf("Viewer: audio player failed to start: %v (continuing with video only)", err)
+		v.audioInitErr = err
 	}
-	audioPlayer := audio.NewPlayer(audioCfg)
+	defer v.stopAudioPlayer()
 
-	// Start audio player in goroutine
-	audioCtx, audioCancel := context.WithCancel(ctx)
-	defer audioCancel()
-
-	go func() {
-		if err := audioPlayer.Run(audioCtx, audioChannel); err != nil {
-			log.Printf("Audio player error: %v", err)
-		}
-	}()
-
-	// Buffer for collecting and reordering blobs
-	var pendingBlobs []SequencedBlobData
-	var nextExpectedSeq uint64 = 1
 	frameBuffer := make([]byte, 0)
 	videoFrameCount := 0
 	audioChunkCount := 0
@@ -216,6 +227,9 @@ func (v *Viewer) RunWithAudio(ctx context.Context) error {
 	// For A/V sync timing
 	var playbackStartTime time.Time
 	playbackStarted := false
+
+	// Unused variable to match expected FPS
+	_ = fps
 
 	log.Printf("Viewer: starting playback from height %d, namespace: %s",
 		currentHeight, hex.EncodeToString(v.namespace))
@@ -236,37 +250,18 @@ func (v *Viewer) RunWithAudio(ctx context.Context) error {
 			continue
 		}
 
-		// Parse and collect sequenced blobs
+		// Process blobs directly (no sequence handling needed for sync mode)
 		for _, b := range blobs {
-			if len(b.Data) < 8 {
-				continue
-			}
 			// Skip entrypoint blobs
-			if _, _, _, valid := streamer.ParseEntrypointBlob(b.Data); valid {
+			if _, _, _, valid := v.decoder.ParseEntrypoint(b.Data); valid {
 				continue
 			}
-			seq := binary.LittleEndian.Uint64(b.Data[:8])
-			data := b.Data[8:]
-			pendingBlobs = append(pendingBlobs, SequencedBlobData{Sequence: seq, Data: data})
-		}
-
-		// Sort pending blobs by sequence
-		sort.Slice(pendingBlobs, func(i, j int) bool {
-			return pendingBlobs[i].Sequence < pendingBlobs[j].Sequence
-		})
-
-		// Process blobs in order
-		for len(pendingBlobs) > 0 && pendingBlobs[0].Sequence == nextExpectedSeq {
-			blob := pendingBlobs[0]
-			pendingBlobs = pendingBlobs[1:]
-			nextExpectedSeq++
-
-			frameBuffer = append(frameBuffer, blob.Data...)
+			frameBuffer = append(frameBuffer, b.Data...)
 		}
 
 		// Decode and display frames from buffer
 		for {
-			frame, consumed := codec.DecodeNextMultiplexedFrame(frameBuffer)
+			frame, consumed := v.decoder.Decode(frameBuffer)
 			if frame == nil {
 				break
 			}
@@ -301,10 +296,9 @@ func (v *Viewer) RunWithAudio(ctx context.Context) error {
 				}
 
 			case codec.FrameTypeAudio:
-				select {
-				case audioChannel <- frame.AudioData:
+				if v.audioInitErr == nil {
+					v.playAudio(frame.AudioData)
 					audioChunkCount++
-				default:
 				}
 			}
 

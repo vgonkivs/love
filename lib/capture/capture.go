@@ -3,35 +3,207 @@ package capture
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 
+	"github.com/gen2brain/malgo"
 	"gocv.io/x/gocv"
+
+	"github.com/vgonkivs/love/lib/codec"
 )
 
-// Capturer captures video frames from webcam and sends them to a channel
-type Capturer struct {
-	ctx    context.Context
-	cancel context.CancelFunc
+const (
+	// ChunkSize is the target size for each blob (1MB)
+	ChunkSize = 1048576
+)
 
-	cfg *Config
-	cam *gocv.VideoCapture
+// Capturer captures video and audio, encodes them, and outputs ready blobs
+type Capturer struct {
+	cfg     *Config
+	encoder codec.Encoder
+
+	// Internal state
+	cam           *gocv.VideoCapture
+	audioCtx      *malgo.AllocatedContext
+	audioDevice   *malgo.Device
+	audioRunning  bool
+	audioMu       sync.Mutex
+	startTime     time.Time
+	sequence      uint32
+	sequenceMu    sync.Mutex
+	buffer        []byte
+	bufferMu      sync.Mutex
+	output        chan<- []byte
+	audioInitErr  error
 }
 
-// NewCapturer creates a new video capturer
-func NewCapturer(cfg *Config) *Capturer {
+// NewCapturer creates a new video/audio capturer
+func NewCapturer(cfg *Config, encoder codec.Encoder) *Capturer {
 	return &Capturer{
-		cfg: cfg,
+		cfg:     cfg,
+		encoder: encoder,
+		buffer:  make([]byte, 0, ChunkSize),
 	}
 }
 
-// Run starts capturing frames and sends them to the output channel.
-// This method blocks until context is cancelled or an error occurs.
-// IMPORTANT: Must be called from the main goroutine (the one running main())
-// because OpenCV GUI operations require the main OS thread on macOS.
-// Ensure runtime.LockOSThread() is called in init() before main() runs.
-func (c *Capturer) Run(ctx context.Context, output chan<- gocv.Mat) error {
-	c.ctx, c.cancel = context.WithCancel(ctx)
+// nextSequence returns the next sequence number (thread-safe)
+func (c *Capturer) nextSequence() uint32 {
+	c.sequenceMu.Lock()
+	defer c.sequenceMu.Unlock()
+	seq := c.sequence
+	c.sequence++
+	return seq
+}
 
+// addToBuffer adds encoded data to buffer and emits chunks when ready
+func (c *Capturer) addToBuffer(ctx context.Context, data []byte) {
+	c.bufferMu.Lock()
+	defer c.bufferMu.Unlock()
+
+	c.buffer = append(c.buffer, data...)
+
+	// Emit full chunks
+	for len(c.buffer) >= ChunkSize {
+		chunk := make([]byte, ChunkSize)
+		copy(chunk, c.buffer[:ChunkSize])
+
+		select {
+		case c.output <- chunk:
+		case <-ctx.Done():
+			return
+		}
+
+		c.buffer = c.buffer[ChunkSize:]
+	}
+}
+
+// flushBuffer sends any remaining data in the buffer
+func (c *Capturer) flushBuffer(ctx context.Context) {
+	c.bufferMu.Lock()
+	defer c.bufferMu.Unlock()
+
+	if len(c.buffer) > 0 {
+		select {
+		case c.output <- c.buffer:
+		case <-ctx.Done():
+		default:
+		}
+		c.buffer = nil
+	}
+}
+
+// startAudioCapture initializes and starts audio capture
+func (c *Capturer) startAudioCapture(ctx context.Context) error {
+	malgoCtx, err := malgo.InitContext(nil, malgo.ContextConfig{}, nil)
+	if err != nil {
+		return err
+	}
+	c.audioCtx = malgoCtx
+
+	deviceConfig := malgo.DefaultDeviceConfig(malgo.Capture)
+	deviceConfig.Capture.Format = malgo.FormatS16
+	deviceConfig.Capture.Channels = uint32(c.cfg.Channels)
+	deviceConfig.SampleRate = uint32(c.cfg.SampleRate)
+	deviceConfig.PeriodSizeInFrames = uint32(c.cfg.AudioBuffer)
+	deviceConfig.Alsa.NoMMap = 1
+
+	// Buffer for accumulating samples
+	var sampleBuffer []byte
+	var bufMu sync.Mutex
+
+	// Samples to accumulate before sending (roughly 100ms worth)
+	samplesPerSend := c.cfg.SampleRate / 10 * c.cfg.Channels * 2
+
+	onRecvFrames := func(outputSamples, inputSamples []byte, frameCount uint32) {
+		bufMu.Lock()
+		defer bufMu.Unlock()
+
+		sampleBuffer = append(sampleBuffer, inputSamples...)
+
+		for len(sampleBuffer) >= samplesPerSend {
+			chunk := make([]byte, samplesPerSend)
+			copy(chunk, sampleBuffer[:samplesPerSend])
+			sampleBuffer = sampleBuffer[samplesPerSend:]
+
+			// Encode audio and add to buffer
+			timestamp := time.Since(c.startTime)
+			seq := c.nextSequence()
+
+			encoded, err := c.encoder.EncodeAudio(chunk, timestamp, seq)
+			if err != nil {
+				log.Printf("Capturer: failed to encode audio: %v", err)
+				continue
+			}
+
+			c.addToBuffer(ctx, encoded)
+		}
+	}
+
+	deviceCallbacks := malgo.DeviceCallbacks{
+		Data: onRecvFrames,
+	}
+
+	device, err := malgo.InitDevice(c.audioCtx.Context, deviceConfig, deviceCallbacks)
+	if err != nil {
+		c.audioCtx.Uninit()
+		c.audioCtx.Free()
+		return err
+	}
+	c.audioDevice = device
+
+	if err := device.Start(); err != nil {
+		device.Uninit()
+		c.audioCtx.Uninit()
+		c.audioCtx.Free()
+		return err
+	}
+
+	c.audioMu.Lock()
+	c.audioRunning = true
+	c.audioMu.Unlock()
+
+	log.Printf("Capturer: audio started (sample rate: %d Hz, channels: %d)", c.cfg.SampleRate, c.cfg.Channels)
+	return nil
+}
+
+// stopAudioCapture stops and cleans up audio capture
+func (c *Capturer) stopAudioCapture() {
+	c.audioMu.Lock()
+	defer c.audioMu.Unlock()
+
+	if !c.audioRunning {
+		return
+	}
+
+	c.audioRunning = false
+	if c.audioDevice != nil {
+		c.audioDevice.Stop()
+		c.audioDevice.Uninit()
+	}
+	if c.audioCtx != nil {
+		c.audioCtx.Uninit()
+		c.audioCtx.Free()
+	}
+	log.Println("Capturer: audio stopped")
+}
+
+// Run starts capturing video and audio, encoding frames, and outputting blobs.
+// This method blocks until context is cancelled or an error occurs.
+// IMPORTANT: Must be called from the main goroutine on macOS for OpenCV GUI.
+func (c *Capturer) Run(ctx context.Context, output chan<- []byte) error {
+	c.output = output
+	c.startTime = time.Now()
+
+	// Send entrypoint blob first (before camera initialization)
+	entrypoint := c.GetEntrypoint()
+	select {
+	case output <- entrypoint:
+		log.Printf("Capturer: sent entrypoint blob")
+	case <-ctx.Done():
+		return nil
+	}
+
+	// Open camera
 	cam, err := gocv.OpenVideoCapture(c.cfg.DeviceID)
 	if err != nil {
 		return err
@@ -45,7 +217,6 @@ func (c *Capturer) Run(ctx context.Context, output chan<- gocv.Mat) error {
 	cam.Set(gocv.VideoCaptureFPS, float64(c.cfg.FPS))
 	cam.Set(gocv.VideoCaptureBufferSize, 1)
 
-	// Log actual settings
 	actualWidth := cam.Get(gocv.VideoCaptureFrameWidth)
 	actualHeight := cam.Get(gocv.VideoCaptureFrameHeight)
 	actualFPS := cam.Get(gocv.VideoCaptureFPS)
@@ -53,6 +224,13 @@ func (c *Capturer) Run(ctx context.Context, output chan<- gocv.Mat) error {
 	log.Printf("Capturer: camera configured %.0fx%.0f@%.1ffps (requested: %dx%d@%dfps)",
 		actualWidth, actualHeight, actualFPS,
 		c.cfg.Width, c.cfg.Height, c.cfg.FPS)
+
+	// Start audio capture (graceful degradation if fails)
+	if err := c.startAudioCapture(ctx); err != nil {
+		log.Printf("Capturer: audio capture failed to start: %v (continuing with video only)", err)
+		c.audioInitErr = err
+	}
+	defer c.stopAudioCapture()
 
 	// Setup preview window if enabled
 	var previewWindow *gocv.Window
@@ -73,7 +251,8 @@ func (c *Capturer) Run(ctx context.Context, output chan<- gocv.Mat) error {
 
 	for {
 		select {
-		case <-c.ctx.Done():
+		case <-ctx.Done():
+			c.flushBuffer(ctx)
 			log.Println("Capturer: stopping")
 			return nil
 
@@ -92,17 +271,32 @@ func (c *Capturer) Run(ctx context.Context, output chan<- gocv.Mat) error {
 				previewWindow.IMShow(frame)
 				if previewWindow.WaitKey(1) == 27 { // ESC key
 					log.Println("Capturer: preview window closed by user")
+					c.flushBuffer(ctx)
 					return nil
 				}
 			}
 
-			// Clone frame and send to channel
-			// The receiver is responsible for closing the cloned Mat
-			select {
-			case output <- frame.Clone():
-			case <-c.ctx.Done():
-				return nil
+			// Encode video frame
+			timestamp := time.Since(c.startTime)
+			seq := c.nextSequence()
+
+			encoded, err := c.encoder.EncodeVideo(frame, timestamp, seq)
+			if err != nil {
+				log.Printf("Capturer: failed to encode video frame: %v", err)
+				continue
 			}
+
+			c.addToBuffer(ctx, encoded)
 		}
 	}
+}
+
+// GetEntrypoint returns the entrypoint blob for this stream
+func (c *Capturer) GetEntrypoint() []byte {
+	return c.encoder.CreateEntrypoint(c.cfg.SampleRate, c.cfg.Channels, c.cfg.FPS)
+}
+
+// AudioFailed returns true if audio initialization failed
+func (c *Capturer) AudioFailed() bool {
+	return c.audioInitErr != nil
 }
