@@ -65,84 +65,41 @@ func (s *Streamer) NamespaceHex() string {
 }
 
 // Run receives blobs from input channel and submits them to Celestia
-// Outputs stream info (namespace + start height) to console on first blob
-// Batches all available blobs together in a single submission
 func (s *Streamer) Run(ctx context.Context, input <-chan []byte) error {
 	if s.client == nil {
-		return fmt.Errorf("not connected to Celestia node")
+		return fmt.Errorf("streamer not connected, call Connect() first")
 	}
 
-	chunkNum := 0
-	var startHeight uint64
+	log.Printf("Streamer: running (namespace: %s)", s.NamespaceHex())
 
-	log.Printf("Streamer: starting blob submission, namespace: %s", s.NamespaceHex())
-
+	var blobCount uint64
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("Streamer: stopping, submitted %d blobs", chunkNum)
+			log.Printf("Streamer: stopping (submitted %d blobs)", blobCount)
 			return nil
-
-		case blobData, ok := <-input:
+		case data, ok := <-input:
 			if !ok {
-				log.Printf("Streamer: input closed, submitted %d blobs", chunkNum)
+				log.Printf("Streamer: input closed (submitted %d blobs)", blobCount)
 				return nil
 			}
 
-			// Collect all available blobs from channel
-			blobsData := [][]byte{blobData}
-		drainLoop:
-			for {
-				select {
-				case data, ok := <-input:
-					if !ok {
-						break drainLoop
-					}
-					blobsData = append(blobsData, data)
-				default:
-					break drainLoop
-				}
-			}
-
-			// Create blobs
-			blobs := make([]*blob.Blob, 0, len(blobsData))
-			for _, data := range blobsData {
-				b, err := blob.NewBlobV0(s.namespace, data)
-				if err != nil {
-					log.Printf("Streamer: failed to create blob %d: %v", chunkNum+len(blobs), err)
-					continue
-				}
-				blobs = append(blobs, b)
-			}
-
-			if len(blobs) == 0 {
-				continue
-			}
-
-			// Submit batch to Celestia with default options
-			height, err := s.client.Blob.Submit(ctx, blobs, blob.NewSubmitOptions())
+			// Create blob from data
+			b, err := blob.NewBlobV0(s.namespace, data)
 			if err != nil {
-				log.Printf("Streamer: failed to submit %d blobs: %v", len(blobs), err)
+				log.Printf("Streamer: failed to create blob: %v", err)
 				continue
 			}
 
-			// First blob - output stream info
-			if chunkNum == 0 {
-				startHeight = height
-				fmt.Println()
-				fmt.Println("=== STREAM STARTED ===")
-				fmt.Printf("Namespace: %s\n", s.NamespaceHex())
-				fmt.Printf("Start Height: %d\n", startHeight)
-				fmt.Println("======================")
-				fmt.Println()
+			// Submit blob to Celestia with default options
+			height, err := s.client.Blob.Submit(ctx, []*blob.Blob{b}, blob.NewSubmitOptions())
+			if err != nil {
+				log.Printf("Streamer: failed to submit blob: %v", err)
+				continue
 			}
 
-			totalBytes := 0
-			for _, data := range blobsData {
-				totalBytes += len(data)
-			}
-			log.Printf("Streamer: %d blobs posted at height %d (%d bytes total)", len(blobs), height, totalBytes)
-			chunkNum += len(blobs)
+			blobCount++
+			log.Printf("Streamer: submitted blob %d (%d bytes) at height %d", blobCount, len(data), height)
 		}
 	}
 }

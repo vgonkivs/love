@@ -19,8 +19,8 @@ func TestNewJPEGCodec(t *testing.T) {
 }
 
 func TestChunkSize(t *testing.T) {
-	if ChunkSize != 1048576 {
-		t.Errorf("expected ChunkSize 1048576 (1MB), got %d", ChunkSize)
+	if ChunkSize != 2097152 {
+		t.Errorf("expected ChunkSize 2097152 (2MB), got %d", ChunkSize)
 	}
 }
 

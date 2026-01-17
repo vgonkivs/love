@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	// ChunkSize is the target size for each blob (1MB)
-	ChunkSize = 1048576
+	// ChunkSize is the target size for each blob (2MB = ~8 seconds of A/V at 2Mbps)
+	ChunkSize = 2097152 // 2MB
 )
 
 // Capturer captures video and audio, encodes them, and outputs ready blobs
@@ -187,12 +187,27 @@ func (c *Capturer) stopAudioCapture() {
 	log.Println("Capturer: audio stopped")
 }
 
+// StartableEncoder is an optional interface for encoders that need initialization
+type StartableEncoder interface {
+	Start() error
+	Close() error
+}
+
 // Run starts capturing video and audio, encoding frames, and outputting blobs.
 // This method blocks until context is cancelled or an error occurs.
 // IMPORTANT: Must be called from the main goroutine on macOS for OpenCV GUI.
 func (c *Capturer) Run(ctx context.Context, output chan<- []byte) error {
 	c.output = output
 	c.startTime = time.Now()
+
+	// Start encoder if it requires initialization (e.g., H.264)
+	if startable, ok := c.encoder.(StartableEncoder); ok {
+		if err := startable.Start(); err != nil {
+			return err
+		}
+		defer startable.Close()
+		log.Printf("Capturer: encoder started")
+	}
 
 	// Send entrypoint blob first (before camera initialization)
 	entrypoint := c.GetEntrypoint()
@@ -253,6 +268,7 @@ func (c *Capturer) Run(ctx context.Context, output chan<- []byte) error {
 		select {
 		case <-ctx.Done():
 			c.flushBuffer(ctx)
+			c.sendStreamEnd(ctx)
 			log.Println("Capturer: stopping")
 			return nil
 
@@ -272,6 +288,7 @@ func (c *Capturer) Run(ctx context.Context, output chan<- []byte) error {
 				if previewWindow.WaitKey(1) == 27 { // ESC key
 					log.Println("Capturer: preview window closed by user")
 					c.flushBuffer(ctx)
+					c.sendStreamEnd(ctx)
 					return nil
 				}
 			}
@@ -286,7 +303,10 @@ func (c *Capturer) Run(ctx context.Context, output chan<- []byte) error {
 				continue
 			}
 
-			c.addToBuffer(ctx, encoded)
+			// H.264 encoder may return nil when frame is still being processed
+			if encoded != nil {
+				c.addToBuffer(ctx, encoded)
+			}
 		}
 	}
 }
@@ -294,6 +314,20 @@ func (c *Capturer) Run(ctx context.Context, output chan<- []byte) error {
 // GetEntrypoint returns the entrypoint blob for this stream
 func (c *Capturer) GetEntrypoint() []byte {
 	return c.encoder.CreateEntrypoint(c.cfg.SampleRate, c.cfg.Channels, c.cfg.FPS)
+}
+
+// sendStreamEnd sends the stream end notification blob
+func (c *Capturer) sendStreamEnd(ctx context.Context) {
+	totalDuration := time.Since(c.startTime)
+	totalFrames := c.sequence // sequence is the total frame count
+	streamEnd := c.encoder.CreateStreamEnd(totalDuration, totalFrames)
+
+	select {
+	case c.output <- streamEnd:
+		log.Printf("Capturer: sent stream end blob (duration: %v, frames: %d)", totalDuration, totalFrames)
+	case <-ctx.Done():
+	default:
+	}
 }
 
 // AudioFailed returns true if audio initialization failed

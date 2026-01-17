@@ -14,7 +14,6 @@ func TestNewCapturer(t *testing.T) {
 		Width:             640,
 		Height:            480,
 		FPS:               15,
-		EnablePreview:     true,
 		PreviewWindowName: "Test Window",
 		AudioDeviceID:     -1,
 		SampleRate:        44100,
@@ -42,9 +41,6 @@ func TestNewCapturer(t *testing.T) {
 	}
 	if capturer.cfg.FPS != 15 {
 		t.Errorf("expected FPS 15, got %d", capturer.cfg.FPS)
-	}
-	if capturer.cfg.EnablePreview != true {
-		t.Error("expected EnablePreview true")
 	}
 	if capturer.cfg.SampleRate != 44100 {
 		t.Errorf("expected SampleRate 44100, got %d", capturer.cfg.SampleRate)
@@ -98,7 +94,6 @@ func TestConfig_Values(t *testing.T) {
 				Width:             1920,
 				Height:            1080,
 				FPS:               60,
-				EnablePreview:     true,
 				PreviewWindowName: "Custom",
 				AudioDeviceID:     -1,
 				SampleRate:        48000,
@@ -110,7 +105,6 @@ func TestConfig_Values(t *testing.T) {
 				Width:             1920,
 				Height:            1080,
 				FPS:               60,
-				EnablePreview:     true,
 				PreviewWindowName: "Custom",
 				AudioDeviceID:     -1,
 				SampleRate:        48000,
@@ -125,7 +119,6 @@ func TestConfig_Values(t *testing.T) {
 				Width:             1,
 				Height:            1,
 				FPS:               1,
-				EnablePreview:     false,
 				PreviewWindowName: "",
 				AudioDeviceID:     -1,
 				SampleRate:        8000,
@@ -137,7 +130,6 @@ func TestConfig_Values(t *testing.T) {
 				Width:             1,
 				Height:            1,
 				FPS:               1,
-				EnablePreview:     false,
 				PreviewWindowName: "",
 				AudioDeviceID:     -1,
 				SampleRate:        8000,
@@ -160,9 +152,6 @@ func TestConfig_Values(t *testing.T) {
 			}
 			if tt.cfg.FPS != tt.expected.FPS {
 				t.Errorf("FPS: got %d, want %d", tt.cfg.FPS, tt.expected.FPS)
-			}
-			if tt.cfg.EnablePreview != tt.expected.EnablePreview {
-				t.Errorf("EnablePreview: got %v, want %v", tt.cfg.EnablePreview, tt.expected.EnablePreview)
 			}
 			if tt.cfg.PreviewWindowName != tt.expected.PreviewWindowName {
 				t.Errorf("PreviewWindowName: got %s, want %s", tt.cfg.PreviewWindowName, tt.expected.PreviewWindowName)

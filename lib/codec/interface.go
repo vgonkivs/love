@@ -16,6 +16,9 @@ type Encoder interface {
 
 	// CreateEntrypoint creates the metadata blob for stream start
 	CreateEntrypoint(sampleRate int, channels int, fps int) []byte
+
+	// CreateStreamEnd creates the stream end notification blob
+	CreateStreamEnd(totalDuration time.Duration, totalFrames uint32) []byte
 }
 
 // Decoder decodes multiplexed video and audio frames

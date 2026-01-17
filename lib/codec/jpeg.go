@@ -82,3 +82,16 @@ func (c *JPEGCodec) ParseEntrypoint(data []byte) (sampleRate int, channels int, 
 
 // EntrypointMarker for entrypoint blobs
 var EntrypointMarker = []byte{'E', 'N', 'T', 'R'}
+
+// StreamEndMarker for stream end notification
+var StreamEndMarker = []byte{'E', 'N', 'D', 'S'}
+
+// CreateStreamEnd creates the stream end notification blob
+// Format: ENDS (4 bytes) + total_duration_ns (8 bytes) + total_frames (4 bytes)
+func (c *JPEGCodec) CreateStreamEnd(totalDuration time.Duration, totalFrames uint32) []byte {
+	data := make([]byte, 16)
+	copy(data[:4], StreamEndMarker)
+	binary.LittleEndian.PutUint64(data[4:12], uint64(totalDuration.Nanoseconds()))
+	binary.LittleEndian.PutUint32(data[12:16], totalFrames)
+	return data
+}

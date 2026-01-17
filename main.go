@@ -58,8 +58,8 @@ func printUsage() {
 	fmt.Println("  -width int         Capture width (default 1280)")
 	fmt.Println("  -height int        Capture height (default 720)")
 	fmt.Println("  -fps int           Frames per second (default 30)")
-	fmt.Println("  -quality int       JPEG quality 1-100 (default 85)")
-	fmt.Println("  -preview           Enable local preview window")
+	fmt.Println("  -bitrate string    H.264 bitrate (default 2M)")
+	fmt.Println("  -no-preview        Disable local preview window")
 	fmt.Println("  -samplerate int    Audio sample rate in Hz (default 44100)")
 	fmt.Println("  -node string       Celestia node URL (default http://localhost:26658)")
 	fmt.Println("  -token string      Celestia node auth token")
@@ -83,13 +83,13 @@ func runStream(args []string) {
 	width := fs.Int("width", 1280, "Capture width")
 	height := fs.Int("height", 720, "Capture height")
 	fps := fs.Int("fps", 30, "Frames per second")
-	preview := fs.Bool("preview", false, "Enable local preview window")
+	noPreview := fs.Bool("no-preview", false, "Disable local preview window")
 
 	// Audio options
 	sampleRate := fs.Int("samplerate", 44100, "Audio sample rate in Hz")
 
 	// Codec options
-	quality := fs.Int("quality", 85, "JPEG quality (1-100)")
+	bitrate := fs.String("bitrate", "2M", "H.264 bitrate (e.g., 2M, 4M)")
 
 	// Celestia options
 	nodeURL := fs.String("node", "http://localhost:26658", "Celestia node URL")
@@ -109,8 +109,15 @@ func runStream(args []string) {
 		cancel()
 	}()
 
-	// Create codec (encoder)
-	encoder := codec.NewJPEGCodec(*quality)
+	// Create codec (H.264 encoder)
+	encoderCfg := codec.H264EncoderConfig{
+		Width:   *width,
+		Height:  *height,
+		FPS:     *fps,
+		Bitrate: *bitrate,
+		GOPSize: *fps * 6, // Keyframe every 6 seconds
+	}
+	encoder := codec.NewH264Encoder(encoderCfg)
 
 	// Create capturer with encoder
 	captureCfg := &capture.Config{
@@ -118,7 +125,7 @@ func runStream(args []string) {
 		Width:             *width,
 		Height:            *height,
 		FPS:               *fps,
-		EnablePreview:     *preview,
+		EnablePreview:     !*noPreview,
 		PreviewWindowName: "Stream Preview (Local)",
 		AudioDeviceID:     -1, // default audio input
 		SampleRate:        *sampleRate,
@@ -202,10 +209,7 @@ func runView(args []string) {
 		cancel()
 	}()
 
-	// Create codec (decoder)
-	decoder := codec.NewJPEGCodec(85) // quality doesn't matter for decoding
-
-	// Create viewer with decoder
+	// Create viewer (decoder will be created after reading entrypoint)
 	viewerCfg := &viewer.Config{
 		NodeURL:    *nodeURL,
 		AuthToken:  *authToken,
@@ -214,7 +218,7 @@ func runView(args []string) {
 		PollDelay:  500 * time.Millisecond,
 	}
 
-	v, err := viewer.NewViewer(viewerCfg, decoder, *namespace, *startHeight)
+	v, err := viewer.NewViewer(viewerCfg, *namespace, *startHeight)
 	if err != nil {
 		log.Fatalf("Failed to create viewer: %v", err)
 	}

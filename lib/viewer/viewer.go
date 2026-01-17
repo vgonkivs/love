@@ -20,6 +20,7 @@ import (
 type Viewer struct {
 	cfg       *Config
 	decoder   codec.Decoder
+	h264Dec   *codec.H264Decoder // For H.264 streams (needs Start/Close)
 	client    *client.Client
 	namespace share.Namespace
 	height    uint64
@@ -35,7 +36,8 @@ type Viewer struct {
 }
 
 // NewViewer creates a new viewer
-func NewViewer(cfg *Config, decoder codec.Decoder, namespaceHex string, startHeight uint64) (*Viewer, error) {
+// Decoder is created automatically based on entrypoint blob
+func NewViewer(cfg *Config, namespaceHex string, startHeight uint64) (*Viewer, error) {
 	// Parse namespace from hex
 	nsBytes, err := hex.DecodeString(namespaceHex)
 	if err != nil {
@@ -49,7 +51,6 @@ func NewViewer(cfg *Config, decoder codec.Decoder, namespaceHex string, startHei
 
 	return &Viewer{
 		cfg:       cfg,
-		decoder:   decoder,
 		namespace: namespace,
 		height:    startHeight,
 	}, nil
@@ -170,9 +171,10 @@ func (v *Viewer) Run(ctx context.Context) error {
 
 	currentHeight := v.height
 
-	// First, try to read entrypoint blob
+	// First, try to read entrypoint blob to detect codec type
 	log.Printf("Viewer: looking for entrypoint blob at height %d", currentHeight)
-	var sampleRate, channels, fps int
+	var sampleRate, channels, fps, width, height int
+	var isH264 bool
 	foundEntrypoint := false
 
 	for !foundEntrypoint {
@@ -189,14 +191,21 @@ func (v *Viewer) Run(ctx context.Context) error {
 		}
 
 		for _, b := range blobs {
-			sr, ch, f, valid := v.decoder.ParseEntrypoint(b.Data)
+			// Try to parse as H.264 entrypoint (extended format)
+			sr, ch, f, w, h, h264, valid := codec.ParseH264Entrypoint(b.Data)
 			if valid {
 				sampleRate = sr
 				channels = ch
 				fps = f
+				width = w
+				height = h
+				isH264 = h264
 				foundEntrypoint = true
-				log.Printf("Viewer: found entrypoint - sample rate: %d, channels: %d, fps: %d",
-					sampleRate, channels, fps)
+				log.Printf("Viewer: found entrypoint - sample rate: %d, channels: %d, fps: %d, codec: %s",
+					sampleRate, channels, fps, map[bool]string{true: "H.264", false: "JPEG"}[isH264])
+				if isH264 {
+					log.Printf("Viewer: video dimensions: %dx%d", width, height)
+				}
 				break
 			}
 		}
@@ -204,6 +213,24 @@ func (v *Viewer) Run(ctx context.Context) error {
 		if !foundEntrypoint {
 			currentHeight++
 		}
+	}
+
+	// Create decoder based on detected codec type
+	if isH264 {
+		decoderCfg := codec.H264DecoderConfig{
+			Width:  width,
+			Height: height,
+		}
+		v.h264Dec = codec.NewH264Decoder(decoderCfg)
+		v.decoder = v.h264Dec
+		if err := v.h264Dec.Start(); err != nil {
+			return fmt.Errorf("failed to start H.264 decoder: %w", err)
+		}
+		defer v.h264Dec.Close()
+		log.Printf("Viewer: H.264 decoder started")
+	} else {
+		v.decoder = codec.NewJPEGCodec(85)
+		log.Printf("Viewer: JPEG decoder initialized")
 	}
 
 	// Move to next height after entrypoint
@@ -253,7 +280,7 @@ func (v *Viewer) Run(ctx context.Context) error {
 		// Process blobs directly (no sequence handling needed for sync mode)
 		for _, b := range blobs {
 			// Skip entrypoint blobs
-			if _, _, _, valid := v.decoder.ParseEntrypoint(b.Data); valid {
+			if _, _, _, _, _, _, valid := codec.ParseH264Entrypoint(b.Data); valid {
 				continue
 			}
 			frameBuffer = append(frameBuffer, b.Data...)
@@ -264,6 +291,12 @@ func (v *Viewer) Run(ctx context.Context) error {
 			frame, consumed := v.decoder.Decode(frameBuffer)
 			if frame == nil {
 				break
+			}
+
+			// Skip FrameTypeNone (H.264 frame still being processed)
+			if frame.Type == codec.FrameTypeNone {
+				frameBuffer = frameBuffer[consumed:]
+				continue
 			}
 
 			// Initialize playback timing on first frame
