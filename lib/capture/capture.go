@@ -12,29 +12,24 @@ import (
 	"github.com/vgonkivs/love/lib/codec"
 )
 
-const (
-	// ChunkSize is the target size for each blob (2MB = ~8 seconds of A/V at 2Mbps)
-	ChunkSize = 2097152 // 2MB
-)
-
 // Capturer captures video and audio, encodes them, and outputs ready blobs
 type Capturer struct {
 	cfg     *Config
 	encoder codec.Encoder
 
 	// Internal state
-	cam           *gocv.VideoCapture
-	audioCtx      *malgo.AllocatedContext
-	audioDevice   *malgo.Device
-	audioRunning  bool
-	audioMu       sync.Mutex
-	startTime     time.Time
-	sequence      uint32
-	sequenceMu    sync.Mutex
-	buffer        []byte
-	bufferMu      sync.Mutex
-	output        chan<- []byte
-	audioInitErr  error
+	cam          *gocv.VideoCapture
+	audioCtx     *malgo.AllocatedContext
+	audioDevice  *malgo.Device
+	audioRunning bool
+	audioMu      sync.Mutex
+	startTime    time.Time
+	sequence     uint32
+	sequenceMu   sync.Mutex
+	buffer       []byte
+	bufferMu     sync.Mutex
+	output       chan<- []byte
+	audioInitErr error
 }
 
 // NewCapturer creates a new video/audio capturer
@@ -42,7 +37,7 @@ func NewCapturer(cfg *Config, encoder codec.Encoder) *Capturer {
 	return &Capturer{
 		cfg:     cfg,
 		encoder: encoder,
-		buffer:  make([]byte, 0, ChunkSize),
+		buffer:  make([]byte, 0, codec.ChunkSize),
 	}
 }
 
@@ -63,17 +58,20 @@ func (c *Capturer) addToBuffer(ctx context.Context, data []byte) {
 	c.buffer = append(c.buffer, data...)
 
 	// Emit full chunks
-	for len(c.buffer) >= ChunkSize {
-		chunk := make([]byte, ChunkSize)
-		copy(chunk, c.buffer[:ChunkSize])
+	for len(c.buffer) >= codec.ChunkSize {
+		chunk := make([]byte, codec.ChunkSize)
+		copy(chunk, c.buffer[:codec.ChunkSize])
 
 		select {
 		case c.output <- chunk:
 		case <-ctx.Done():
 			return
+		default:
+			// Channel full, drop chunk to prevent preview freeze
+			log.Println("Capturer: output channel full, dropping chunk")
 		}
 
-		c.buffer = c.buffer[ChunkSize:]
+		c.buffer = c.buffer[codec.ChunkSize:]
 	}
 }
 
@@ -135,7 +133,7 @@ func (c *Capturer) startAudioCapture(ctx context.Context) error {
 				continue
 			}
 
-			c.addToBuffer(ctx, encoded)
+			go c.addToBuffer(ctx, encoded)
 		}
 	}
 
@@ -305,7 +303,7 @@ func (c *Capturer) Run(ctx context.Context, output chan<- []byte) error {
 
 			// H.264 encoder may return nil when frame is still being processed
 			if encoded != nil {
-				c.addToBuffer(ctx, encoded)
+				go c.addToBuffer(ctx, encoded)
 			}
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"time"
 
 	client "github.com/celestiaorg/celestia-openrpc"
 	"github.com/celestiaorg/celestia-openrpc/types/blob"
@@ -91,17 +92,17 @@ func (s *Streamer) Run(ctx context.Context, input <-chan []byte) error {
 				continue
 			}
 
+			start := time.Now()
 			// Submit blob to Celestia with default options
 			height, err := s.client.Blob.Submit(ctx, []*blob.Blob{b}, blob.NewSubmitOptions())
 			if err != nil {
 				log.Printf("Streamer: failed to submit blob: %v", err)
 				continue
 			}
+			elapsed := time.Since(start)
 
 			blobCount++
-			log.Printf("Streamer: submitted blob %d (%d bytes) at height %d", blobCount, len(data), height)
+			log.Printf("Streamer: submitted blob %d (%d bytes) at height %d. elapsed time %f", blobCount, len(data), height, elapsed.Seconds())
 		}
 	}
 }
-
-

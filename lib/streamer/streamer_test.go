@@ -173,7 +173,7 @@ func TestStreamer_Run_ContextCancelled(t *testing.T) {
 
 	// Test that Run returns error when not connected
 	ctx, cancel := context.WithCancel(context.Background())
-	input := make(chan []byte, 1)
+	input := make(chan []byte, 100)
 
 	// Cancel immediately
 	cancel()

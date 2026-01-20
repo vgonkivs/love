@@ -65,7 +65,7 @@ func TestCapturer_Run_InvalidDevice(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	output := make(chan []byte, 1)
+	output := make(chan []byte, 100)
 
 	// Run should fail with invalid device
 	// Note: This behavior depends on the system - some systems may not error immediately

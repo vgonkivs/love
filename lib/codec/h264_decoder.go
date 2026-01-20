@@ -28,6 +28,13 @@ type H264Decoder struct {
 	started     bool
 	closed      bool
 	closeMu     sync.Mutex
+
+	// Cached SPS/PPS for mid-stream joining
+	sps     []byte
+	pps     []byte
+	spsPps  []byte // Combined SPS+PPS to prepend
+	spsMu   sync.Mutex
+	hasSPS  bool
 }
 
 // H264DecoderConfig holds configuration for the H.264 decoder
@@ -145,6 +152,29 @@ func (d *H264Decoder) readOutput() {
 	}
 }
 
+// getNALType returns the NAL unit type from H.264 data (handles both 3 and 4 byte start codes)
+func getNALType(data []byte) int {
+	if len(data) < 5 {
+		return -1
+	}
+	// Check for 4-byte start code (0x00000001)
+	if data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1 {
+		return int(data[4] & 0x1F)
+	}
+	// Check for 3-byte start code (0x000001)
+	if data[0] == 0 && data[1] == 0 && data[2] == 1 {
+		return int(data[3] & 0x1F)
+	}
+	return -1
+}
+
+// NAL unit types
+const (
+	nalTypeSPS = 7  // Sequence Parameter Set
+	nalTypePPS = 8  // Picture Parameter Set
+	nalTypeIDR = 5  // IDR frame (keyframe)
+)
+
 // DecodeH264Frame decodes raw H.264 NAL unit data (without our header)
 // This feeds the H.264 data to ffmpeg and returns any available decoded frame
 func (d *H264Decoder) DecodeH264Frame(h264Data []byte) (*gocv.Mat, error) {
@@ -158,6 +188,32 @@ func (d *H264Decoder) DecodeH264Frame(h264Data []byte) (*gocv.Mat, error) {
 		return nil, fmt.Errorf("decoder not started, call Start() first")
 	}
 	d.closeMu.Unlock()
+
+	// Check NAL type and cache SPS/PPS
+	nalType := getNALType(h264Data)
+
+	d.spsMu.Lock()
+	switch nalType {
+	case nalTypeSPS:
+		d.sps = make([]byte, len(h264Data))
+		copy(d.sps, h264Data)
+		d.updateSpsPps()
+	case nalTypePPS:
+		d.pps = make([]byte, len(h264Data))
+		copy(d.pps, h264Data)
+		d.updateSpsPps()
+	case nalTypeIDR:
+		// For IDR frames, prepend SPS/PPS if we have them and haven't sent them yet
+		if len(d.spsPps) > 0 && !d.hasSPS {
+			_, err := d.stdin.Write(d.spsPps)
+			if err != nil {
+				d.spsMu.Unlock()
+				return nil, fmt.Errorf("failed to write SPS/PPS: %w", err)
+			}
+			d.hasSPS = true
+		}
+	}
+	d.spsMu.Unlock()
 
 	// Write H.264 data to ffmpeg stdin
 	_, err := d.stdin.Write(h264Data)
@@ -175,6 +231,15 @@ func (d *H264Decoder) DecodeH264Frame(h264Data []byte) (*gocv.Mat, error) {
 	default:
 		// Frame is being processed
 		return nil, nil
+	}
+}
+
+// updateSpsPps combines SPS and PPS into a single buffer
+func (d *H264Decoder) updateSpsPps() {
+	if len(d.sps) > 0 && len(d.pps) > 0 {
+		d.spsPps = make([]byte, len(d.sps)+len(d.pps))
+		copy(d.spsPps, d.sps)
+		copy(d.spsPps[len(d.sps):], d.pps)
 	}
 }
 
@@ -290,6 +355,22 @@ func (d *H264Decoder) Close() error {
 // GetStderr returns ffmpeg stderr output for debugging
 func (d *H264Decoder) GetStderr() string {
 	return d.stderr.String()
+}
+
+// DrainFrames returns all currently available decoded frames (non-blocking)
+func (d *H264Decoder) DrainFrames() []*gocv.Mat {
+	var frames []*gocv.Mat
+	for {
+		select {
+		case frame, ok := <-d.decodedChan:
+			if !ok {
+				return frames
+			}
+			frames = append(frames, frame)
+		default:
+			return frames
+		}
+	}
 }
 
 // ParseEntrypoint implements the Decoder interface

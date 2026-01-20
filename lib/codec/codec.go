@@ -6,7 +6,7 @@ import (
 
 const (
 	// ChunkSize is the target size for each blob (2MB = ~8 seconds of A/V at 2Mbps)
-	ChunkSize = 2097152 // 2MB
+	ChunkSize = 1974272 // 2MB
 )
 
 // Frame type markers for multiplexing audio and video

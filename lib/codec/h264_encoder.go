@@ -180,12 +180,14 @@ func (e *H264Encoder) readOutput() {
 					nalBuf.Write(data[lastEnd:])
 				}
 
-				// Send complete frames
+				// Send complete frames (drop if channel full to prevent deadlock)
 				for _, frame := range frames {
 					select {
 					case e.encodedChan <- frame:
 					case <-e.done:
 						return
+					default:
+						// Channel full, drop frame to prevent blocking ffmpeg
 					}
 				}
 			}
@@ -253,16 +255,22 @@ func (e *H264Encoder) EncodeVideo(frame gocv.Mat, timestamp time.Duration, seque
 
 	e.frameCount++
 
-	// Try to read an encoded frame (non-blocking)
-	select {
-	case encoded, ok := <-e.encodedChan:
-		if !ok {
-			return nil, fmt.Errorf("encoder channel closed")
+	// Drain all available encoded NAL units and combine them
+	var allNALs []byte
+	for {
+		select {
+		case encoded, ok := <-e.encodedChan:
+			if !ok {
+				return nil, fmt.Errorf("encoder channel closed")
+			}
+			allNALs = append(allNALs, encoded...)
+		default:
+			// No more NAL units available
+			if len(allNALs) > 0 {
+				return e.wrapFrame(allNALs, timestamp, sequence), nil
+			}
+			return nil, nil
 		}
-		return e.wrapFrame(encoded, timestamp, sequence), nil
-	default:
-		// Frame is being processed, return nil (caller should use ReadEncodedFrame)
-		return nil, nil
 	}
 }
 

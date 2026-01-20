@@ -26,13 +26,13 @@ type Viewer struct {
 	height    uint64
 
 	// Audio player state
-	audioCtx      *malgo.AllocatedContext
-	audioDevice   *malgo.Device
-	audioBuffer   []byte
-	audioBufMu    sync.Mutex
-	audioRunning  bool
-	audioMu       sync.Mutex
-	audioInitErr  error
+	audioCtx     *malgo.AllocatedContext
+	audioDevice  *malgo.Device
+	audioBuffer  []byte
+	audioBufMu   sync.Mutex
+	audioRunning bool
+	audioMu      sync.Mutex
+	audioInitErr error
 }
 
 // NewViewer creates a new viewer
@@ -185,8 +185,9 @@ func (v *Viewer) Run(ctx context.Context) error {
 		}
 
 		blobs, err := v.client.Blob.GetAll(ctx, currentHeight, []share.Namespace{v.namespace})
-		if err != nil {
-			time.Sleep(v.cfg.PollDelay)
+		if err != nil || len(blobs) == 0 {
+			// No blobs at this height, move to next immediately
+			currentHeight++
 			continue
 		}
 
@@ -247,13 +248,8 @@ func (v *Viewer) Run(ctx context.Context) error {
 	}
 	defer v.stopAudioPlayer()
 
-	frameBuffer := make([]byte, 0)
 	videoFrameCount := 0
 	audioChunkCount := 0
-
-	// For A/V sync timing
-	var playbackStartTime time.Time
-	playbackStarted := false
 
 	// Unused variable to match expected FPS
 	_ = fps
@@ -261,7 +257,21 @@ func (v *Viewer) Run(ctx context.Context) error {
 	log.Printf("Viewer: starting playback from height %d, namespace: %s",
 		currentHeight, hex.EncodeToString(v.namespace))
 
+	// Start background blob fetcher
+	blobChan := make(chan []byte, 10) // Buffer up to 10 blobs
+	fetchCtx, fetchCancel := context.WithCancel(ctx)
+	defer fetchCancel()
+
+	go v.fetchBlobs(fetchCtx, currentHeight, blobChan)
+
+	// Playback loop
+	frameBuffer := make([]byte, 0)
+	var firstVideoTimestamp uint64
+	var playbackStartTime time.Time
+	videoTimingStarted := false
+
 	for {
+		// Check for cancellation
 		select {
 		case <-ctx.Done():
 			log.Printf("Viewer: stopping, displayed %d video frames, played %d audio chunks",
@@ -270,72 +280,137 @@ func (v *Viewer) Run(ctx context.Context) error {
 		default:
 		}
 
-		// Fetch blobs at current height
-		blobs, err := v.client.Blob.GetAll(ctx, currentHeight, []share.Namespace{v.namespace})
-		if err != nil {
-			time.Sleep(v.cfg.PollDelay)
+		// Non-blocking refill from blob channel
+	refillLoop:
+		for {
+			select {
+			case data, ok := <-blobChan:
+				if !ok {
+					if len(frameBuffer) == 0 {
+						log.Printf("Viewer: blob channel closed, displayed %d video frames", videoFrameCount)
+						return nil
+					}
+					break refillLoop
+				}
+				frameBuffer = append(frameBuffer, data...)
+			default:
+				break refillLoop
+			}
+		}
+
+		// Decode and display frames from buffer
+		frame, consumed := v.decoder.Decode(frameBuffer)
+		if consumed == 0 {
+			// Not enough data, wait for more (blocking)
+			log.Printf("Viewer: waiting for data (buffer: %d bytes, frames: %d)", len(frameBuffer), videoFrameCount)
+			select {
+			case <-ctx.Done():
+				return nil
+			case data, ok := <-blobChan:
+				if !ok {
+					return nil
+				}
+				frameBuffer = append(frameBuffer, data...)
+			}
 			continue
 		}
 
-		// Process blobs directly (no sequence handling needed for sync mode)
+		if frame == nil {
+			// Unknown marker, skip
+			frameBuffer = frameBuffer[consumed:]
+			continue
+		}
+
+		// Skip FrameTypeNone (H.264 frame still being processed)
+		if frame.Type == codec.FrameTypeNone {
+			frameBuffer = frameBuffer[consumed:]
+			// Check for decoded frames from H.264 decoder
+			if v.h264Dec != nil {
+				for _, videoFrame := range v.h264Dec.DrainFrames() {
+					if videoFrame != nil {
+						window.IMShow(*videoFrame)
+						if window.WaitKey(1) == 27 {
+							videoFrame.Close()
+							return nil
+						}
+						videoFrame.Close()
+						videoFrameCount++
+					}
+				}
+			}
+			continue
+		}
+
+		switch frame.Type {
+		case codec.FrameTypeVideo:
+			if frame.VideoFrame != nil {
+				// Pace video based on timestamps
+				if !videoTimingStarted {
+					firstVideoTimestamp = frame.Timestamp
+					playbackStartTime = time.Now()
+					videoTimingStarted = true
+				} else {
+					// Calculate when this frame should be displayed
+					elapsed := frame.Timestamp - firstVideoTimestamp
+					targetTime := playbackStartTime.Add(time.Duration(elapsed))
+					waitTime := time.Until(targetTime)
+					if waitTime > 0 && waitTime < time.Second {
+						time.Sleep(waitTime)
+					}
+				}
+
+				window.IMShow(*frame.VideoFrame)
+				if window.WaitKey(1) == 27 {
+					frame.VideoFrame.Close()
+					return nil
+				}
+				frame.VideoFrame.Close()
+				videoFrameCount++
+			}
+
+		case codec.FrameTypeAudio:
+			if v.audioInitErr == nil {
+				v.playAudio(frame.AudioData)
+				audioChunkCount++
+			}
+		}
+
+		frameBuffer = frameBuffer[consumed:]
+	}
+}
+
+// fetchBlobs fetches blobs in the background and sends data to channel
+func (v *Viewer) fetchBlobs(ctx context.Context, startHeight uint64, out chan<- []byte) {
+	defer close(out)
+	currentHeight := startHeight
+	blobsSent := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		blobs, err := v.client.Blob.GetAll(ctx, currentHeight, []share.Namespace{v.namespace})
+		if err != nil || len(blobs) == 0 {
+			currentHeight++
+			continue
+		}
+
 		for _, b := range blobs {
 			// Skip entrypoint blobs
 			if _, _, _, _, _, _, valid := codec.ParseH264Entrypoint(b.Data); valid {
 				continue
 			}
-			frameBuffer = append(frameBuffer, b.Data...)
-		}
 
-		// Decode and display frames from buffer
-		for {
-			frame, consumed := v.decoder.Decode(frameBuffer)
-			if frame == nil {
-				break
+			select {
+			case <-ctx.Done():
+				return
+			case out <- b.Data:
+				blobsSent++
+				log.Printf("Fetcher: sent blob %d (%d bytes) from height %d", blobsSent, len(b.Data), currentHeight)
 			}
-
-			// Skip FrameTypeNone (H.264 frame still being processed)
-			if frame.Type == codec.FrameTypeNone {
-				frameBuffer = frameBuffer[consumed:]
-				continue
-			}
-
-			// Initialize playback timing on first frame
-			if !playbackStarted {
-				playbackStartTime = time.Now()
-				playbackStarted = true
-			}
-
-			// Calculate expected playback time based on frame timestamp
-			expectedTime := playbackStartTime.Add(time.Duration(frame.Timestamp))
-			waitTime := time.Until(expectedTime)
-
-			// Wait if we're ahead of schedule (but don't wait too long)
-			if waitTime > 0 && waitTime < 500*time.Millisecond {
-				time.Sleep(waitTime)
-			}
-
-			switch frame.Type {
-			case codec.FrameTypeVideo:
-				if frame.VideoFrame != nil {
-					window.IMShow(*frame.VideoFrame)
-					key := window.WaitKey(1)
-					if key == 27 {
-						log.Println("Viewer: user closed window")
-						frame.VideoFrame.Close()
-						return nil
-					}
-					frame.VideoFrame.Close()
-					videoFrameCount++
-				}
-
-			case codec.FrameTypeAudio:
-				if v.audioInitErr == nil {
-					v.playAudio(frame.AudioData)
-					audioChunkCount++
-				}
-			}
-
-			frameBuffer = frameBuffer[consumed:]
 		}
 
 		currentHeight++
