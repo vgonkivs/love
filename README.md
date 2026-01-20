@@ -13,9 +13,10 @@ LOVE is a decentralized live streaming platform built on Celestia's data availab
 - **Live Streaming**: Real-time video capture from webcam with configurable resolution and framerate
 - **H.264 Video Compression**: Efficient video encoding using ffmpeg for optimal streaming
 - **Audio Support**: Synchronized audio capture from microphone (16-bit PCM, configurable sample rate)
-- **Local Preview**: Always-on local preview window for monitoring your stream
+- **Local Preview**: Optional local preview window for monitoring your stream
 - **On-chain Storage**: Stream data is stored as Celestia blobs with automatic gas estimation
-- **A/V Sync**: Timestamps ensure proper audio/video synchronization
+- **A/V Sync**: Timestamp-based synchronization ensures proper audio/video playback
+- **Background Prefetching**: Viewer fetches blobs in background for smooth playback
 - **Decentralized**: No central server - streams go directly to the blockchain
 - **Censorship Resistant**: Once on-chain, streams cannot be removed
 - **Pluggable Codec**: Interface-based design allows swapping encoding implementations
@@ -25,20 +26,44 @@ LOVE is a decentralized live streaming platform built on Celestia's data availab
 ### Prerequisites
 
 1. **Go 1.21+**
-2. **OpenCV 4.x** with GoCV bindings (`brew install opencv` on macOS)
-3. **ffmpeg** (required for H.264 encoding/decoding)
-4. **Celestia light node** running locally (or remote node access) - optional for local mode
-5. **Auth token** for Celestia node - optional for local mode
+
+2. **ffmpeg** (required for H.264 encoding/decoding)
+   ```bash
+   # macOS
+   brew install ffmpeg
+
+   # Ubuntu/Debian
+   apt install ffmpeg
+   ```
+
+3. **OpenCV 4.x** with GoCV bindings
+   ```bash
+   # macOS
+   brew install opencv
+
+   # Ubuntu/Debian
+   apt install libopencv-dev
+   ```
+
+4. **Audio libraries** (Linux only)
+   ```bash
+   # Ubuntu/Debian (ALSA)
+   apt install libasound2-dev
+   ```
+
+5. **Celestia light node** running locally (or remote node access)
+
+6. **Auth token** for Celestia node
 
 ### Installation
 
 ```bash
 git clone https://github.com/vgonkivs/love.git
 cd love
-go build -o love .
+make build
 ```
 
-### Get Celestia Auth Token (if using Celestia)
+### Get Celestia Auth Token
 
 ```bash
 celestia light auth admin --p2p.network <network>
@@ -46,28 +71,49 @@ celestia light auth admin --p2p.network <network>
 
 ## Usage
 
-### Start Streaming
+### Using Make (Recommended)
 
 ```bash
-# Basic streaming (video + audio with local preview)
+# Stream with local preview
+make stream token=<auth_token>
+
+# Stream with custom settings
+make stream token=<auth_token> fps=15 width=640 height=480
+
+# View a stream
+make view token=<auth_token> namespace=<hex> start_height=<height>
+
+# Show help
+make help
+```
+
+### Using Binary Directly
+
+```bash
+# Basic streaming
 ./love stream -token <auth_token>
 
 # Custom settings
 ./love stream -width 1920 -height 1080 -fps 30 -bitrate 4M -samplerate 48000 -token <auth_token>
 
-# Local mode (no Celestia token needed, preview only)
-./love stream
+# View a stream
+./love view -namespace <namespace_hex> -height <start_height> -token <auth_token>
 ```
 
-The stream will open a local preview window automatically. Press **ESC** to stop streaming.
+Press **ESC** to stop streaming or exit viewer.
 
-### View a Stream
+### Make Variables
 
-```bash
-./love view -namespace <namespace> -height <start_height> -token <auth_token>
-```
-
-Press **ESC** to exit.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `token` | | Celestia auth token (required) |
+| `node` | http://localhost:26658 | Celestia node URL |
+| `camera` | 0 | Camera device ID |
+| `width` | 1280 | Video width (pixels) |
+| `height` | 720 | Video height (pixels) |
+| `fps` | 30 | Frames per second |
+| `namespace` | | Stream namespace hex (required for view) |
+| `start_height` | | Start block height (required for view) |
 
 ## Architecture
 
@@ -118,11 +164,13 @@ Press **ESC** to exit.
 │   │                          Viewer                                       │  │
 │   │                                                                       │  │
 │   │  ┌─────────────────┐    ┌──────────────┐    ┌────────────────────┐   │  │
-│   │  │  Fetch Blobs    │───▶│   Decoder    │───▶│  Display (GoCV)    │   │  │
-│   │  │  - A/V sync     │    │  (H.264)     │    └────────────────────┘   │  │
-│   │  └─────────────────┘    │              │    ┌────────────────────┐   │  │
-│   │                         │              │───▶│  Audio Player      │   │  │
-│   │                         └──────────────┘    └────────────────────┘   │  │
+│   │  │ Background      │───▶│   Decoder    │───▶│  Display (GoCV)    │   │  │
+│   │  │ Blob Fetcher    │    │  (H.264)     │    └────────────────────┘   │  │
+│   │  │ (prefetching)   │    │              │    ┌────────────────────┐   │  │
+│   │  └─────────────────┘    │              │───▶│  Audio Player      │   │  │
+│   │                         └──────────────┘    │  (malgo)           │   │  │
+│   │                                             └────────────────────┘   │  │
+│   │  A/V Sync: Video paced by timestamps, audio plays at sample rate    │  │
 │   └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -164,7 +212,7 @@ Each video/audio frame is prefixed with a header:
 └───────────┴───────────┴─────────────────┴──────────────┘
 ```
 
-- **H264**: H.264 encoded video frame
+- **H264**: H.264 encoded video frame (may contain multiple NAL units: SPS, PPS, IDR, P-frames)
 - **AUDF**: Audio frame (16-bit PCM samples)
 
 ### Blob Structure
@@ -222,13 +270,13 @@ This allows viewers to distinguish between "stream ended gracefully" vs "stream 
 | `-bitrate` | 2M | H.264 bitrate (e.g., 2M, 4M) |
 | `-samplerate` | 44100 | Audio sample rate (Hz) |
 | `-node` | http://localhost:26658 | Celestia node URL |
-| `-token` | | Auth token (optional for local mode) |
+| `-token` | | Auth token (required) |
 
 ### View Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-namespace` | | Stream namespace (required) |
+| `-namespace` | | Stream namespace hex (required) |
 | `-height` | | Start block height (required) |
 | `-node` | http://localhost:26658 | Celestia node URL |
 | `-token` | | Auth token (required) |
@@ -239,8 +287,8 @@ This allows viewers to distinguish between "stream ended gracefully" vs "stream 
 
 1. **Entrypoint**: Capturer sends entrypoint blob with stream metadata (sample rate, channels, fps, dimensions, codec)
 2. **Initialize**: Capturer opens webcam (GoCV) and microphone (malgo)
-3. **Preview**: Frames are displayed in local preview window immediately after capture
-4. **Encode**: Video frames are H.264 encoded via ffmpeg, audio is 16-bit PCM
+3. **Preview**: Frames are displayed in local preview window (optional)
+4. **Encode**: Video frames are H.264 encoded via ffmpeg (SPS/PPS/IDR combined), audio is 16-bit PCM
 5. **Multiplex**: Frames are tagged with H264/AUDF markers and timestamps
 6. **Chunk**: Data is accumulated into 2MB buffers inside Capturer (~8 seconds of A/V)
 7. **Submit**: Blobs are submitted to Celestia via Streamer with automatic gas estimation
@@ -248,19 +296,21 @@ This allows viewers to distinguish between "stream ended gracefully" vs "stream 
 
 ### Viewing
 
-1. **Viewer** connects to Celestia node
+1. **Connect**: Viewer connects to Celestia node
 2. **Find Entrypoint**: Locate the ENTR blob with stream parameters and codec type
-3. **Create Decoder**: Initialize H.264 or JPEG decoder based on codec identifier
-4. **Fetch Blobs**: Poll for new blobs at sequential block heights
-5. **Decode**: Parse frame headers, decode H.264/PCM data via the Decoder interface
-6. **Sync**: Use timestamps to synchronize audio and video playback
+3. **Create Decoder**: Initialize H.264 decoder based on codec identifier
+4. **Background Fetch**: Goroutine prefetches blobs at sequential block heights into a buffered channel
+5. **Decode**: Parse frame headers, decode H.264 video via ffmpeg, extract PCM audio
+6. **A/V Sync**: Video is paced by timestamps, audio plays at native sample rate through malgo
 7. **Display**: Show video in window, play audio through speakers
+8. **SPS/PPS Caching**: Decoder caches parameter sets for mid-stream joining
 
 ## Package Structure
 
 ```
 love/
 ├── main.go              # CLI entry point
+├── Makefile             # Build and run commands
 ├── cmd/
 │   └── chaintest/       # H.264 encode/decode chain test app
 │       └── main.go
@@ -279,9 +329,27 @@ love/
 │   │   ├── streamer.go  # Streamer implementation
 │   │   └── config.go    # Streamer configuration
 │   └── viewer/          # Blob fetching + playback with embedded decoder
-│       ├── viewer.go    # Viewer implementation
+│       ├── viewer.go    # Viewer implementation (background fetcher + A/V sync)
 │       └── config.go    # Viewer configuration
 ```
+
+## Troubleshooting
+
+### Video not displaying
+- Ensure ffmpeg is installed: `ffmpeg -version`
+- Check if OpenCV/GoCV is properly installed
+
+### Audio not working
+- Linux: Install ALSA dev libraries: `apt install libasound2-dev`
+- Check microphone permissions
+
+### "non-existing PPS referenced" errors
+- This happens when joining mid-stream before a keyframe
+- Wait for the next keyframe or restart from an earlier height
+
+### A/V out of sync
+- Ensure you're using a fresh recording (old recordings may have sync issues)
+- The viewer uses timestamp-based sync - video paced by timestamps, audio at native rate
 
 ## License
 
