@@ -6,32 +6,61 @@
 
 ## What is LOVE?
 
-LOVE is a decentralized live streaming platform built on Celestia's data availability layer. It captures video and audio from your webcam/microphone, encodes and multiplexes them into 1MB data chunks, and submits them as blobs to the Celestia blockchain. Viewers can then fetch these blobs and play back the stream in real-time with synchronized audio and video.
+LOVE is a decentralized live streaming platform built on Celestia's data availability layer. It captures video and audio from your webcam/microphone, encodes them using H.264 video compression, multiplexes them into 2MB data chunks (~8 seconds of A/V), and submits them as blobs to the Celestia blockchain. Viewers can then fetch these blobs and play back the stream in real-time with synchronized audio and video.
 
 ## Features
 
 - **Live Streaming**: Real-time video capture from webcam with configurable resolution and framerate
-- **Audio Support**: Synchronized audio capture from microphone (16-bit PCM, 44.1kHz)
-- **On-chain Storage**: All stream data stored as Celestia blobs
-- **A/V Sync**: Timestamps and sequence numbers ensure proper audio/video synchronization
+- **H.264 Video Compression**: Efficient video encoding using ffmpeg for optimal streaming
+- **Audio Support**: Synchronized audio capture from microphone (16-bit PCM, configurable sample rate)
+- **Local Preview**: Optional local preview window for monitoring your stream
+- **On-chain Storage**: Stream data is stored as Celestia blobs with automatic gas estimation
+- **A/V Sync**: Timestamp-based synchronization ensures proper audio/video playback
+- **Background Prefetching**: Viewer fetches blobs in background for smooth playback
 - **Decentralized**: No central server - streams go directly to the blockchain
 - **Censorship Resistant**: Once on-chain, streams cannot be removed
+- **Pluggable Codec**: Interface-based design allows swapping encoding implementations
 
 ## Quick Start
 
 ### Prerequisites
 
 1. **Go 1.21+**
-2. **OpenCV 4.x** with GoCV bindings (`brew install opencv` on macOS)
-3. **Celestia light node** running locally (or remote node access)
-4. **Auth token** for Celestia node
+
+2. **ffmpeg** (required for H.264 encoding/decoding)
+   ```bash
+   # macOS
+   brew install ffmpeg
+
+   # Ubuntu/Debian
+   apt install ffmpeg
+   ```
+
+3. **OpenCV 4.x** with GoCV bindings
+   ```bash
+   # macOS
+   brew install opencv
+
+   # Ubuntu/Debian
+   apt install libopencv-dev
+   ```
+
+4. **Audio libraries** (Linux only)
+   ```bash
+   # Ubuntu/Debian (ALSA)
+   apt install libasound2-dev
+   ```
+
+5. **Celestia light node** running locally (or remote node access)
+
+6. **Auth token** for Celestia node
 
 ### Installation
 
 ```bash
 git clone https://github.com/vgonkivs/love.git
 cd love
-go build -o love .
+make build
 ```
 
 ### Get Celestia Auth Token
@@ -42,44 +71,49 @@ celestia light auth admin --p2p.network <network>
 
 ## Usage
 
-### Start Streaming
+### Using Make (Recommended)
 
 ```bash
-# Video only
+# Stream with local preview
+make stream token=<auth_token>
+
+# Stream with custom settings
+make stream token=<auth_token> fps=15 width=640 height=480
+
+# View a stream
+make view token=<auth_token> namespace=<hex> start_height=<height>
+
+# Show help
+make help
+```
+
+### Using Binary Directly
+
+```bash
+# Basic streaming
 ./love stream -token <auth_token>
 
-# Video + Audio
-./love stream -audio -token <auth_token>
-
-# With local preview window
-./love stream -audio -preview -token <auth_token>
-
 # Custom settings
-./love stream -audio -width 1920 -height 1080 -fps 30 -quality 90 -token <auth_token>
+./love stream -width 1920 -height 1080 -fps 30 -bitrate 4M -samplerate 48000 -token <auth_token>
+
+# View a stream
+./love view -namespace <namespace_hex> -height <start_height> -token <auth_token>
 ```
 
-When the stream starts, you'll see:
+Press **ESC** to stop streaming or exit viewer.
 
-```
-=== STREAM STARTED ===
-Namespace: 00000000000000000000a1b2c3d4e5f6a7b8c9d0
-Start Height: 1234567
-======================
-```
+### Make Variables
 
-**Share the namespace and height with viewers!**
-
-### View a Stream
-
-```bash
-# Video only
-./love view -namespace <namespace> -height <start_height> -token <auth_token>
-
-# Video + Audio
-./love view -audio -namespace <namespace> -height <start_height> -token <auth_token>
-```
-
-Press **ESC** to exit.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `token` | | Celestia auth token (required) |
+| `node` | http://localhost:26658 | Celestia node URL |
+| `camera` | 0 | Camera device ID |
+| `width` | 1280 | Video width (pixels) |
+| `height` | 720 | Video height (pixels) |
+| `fps` | 30 | Frames per second |
+| `namespace` | | Stream namespace hex (required for view) |
+| `start_height` | | Start block height (required for view) |
 
 ## Architecture
 
@@ -88,39 +122,78 @@ Press **ESC** to exit.
 │                              STREAMING                                       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│   ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────────────────┐  │
-│   │  Webcam  │───▶│ Capture  │───▶│          │    │                      │  │
-│   └──────────┘    │ (GoCV)   │    │          │    │      Streamer        │  │
-│                   └──────────┘    │  Codec   │───▶│                      │  │
-│   ┌──────────┐    ┌──────────┐    │          │    │  - Random namespace  │  │
-│   │   Mic    │───▶│ Capture  │───▶│          │    │  - Batch submission  │  │
-│   └──────────┘    │ (malgo)  │    └──────────┘    │  - Entrypoint blob   │  │
-│                   └──────────┘                    └──────────┬───────────┘  │
-│                                                              │              │
-└──────────────────────────────────────────────────────────────┼──────────────┘
-                                                               │
-                                                               ▼
-                                                    ┌──────────────────────┐
-                                                    │   Celestia Network   │
-                                                    │                      │
-                                                    │   Blobs stored in    │
-                                                    │   namespace at       │
-                                                    │   sequential heights │
-                                                    └──────────┬───────────┘
-                                                               │
-┌──────────────────────────────────────────────────────────────┼──────────────┐
-│                              VIEWING                         │              │
-├──────────────────────────────────────────────────────────────┼──────────────┤
-│                                                              ▼              │
-│   ┌──────────────────────┐    ┌──────────┐    ┌──────────────────────┐     │
-│   │       Viewer         │───▶│ Decoder  │───▶│   Display (GoCV)     │     │
-│   │                      │    │          │    └──────────────────────┘     │
-│   │  - Fetch blobs       │    │          │    ┌──────────────────────┐     │
-│   │  - Reorder by seq    │    │          │───▶│   Audio Player       │     │
-│   │  - A/V sync timing   │    │          │    │   (malgo)            │     │
-│   └──────────────────────┘    └──────────┘    └──────────────────────┘     │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │                         Capturer                                      │  │
+│   │  1. Send entrypoint blob (metadata)                                  │  │
+│   │  2. Initialize devices:                                              │  │
+│   │  ┌──────────┐                                                        │  │
+│   │  │  Webcam  │──┐                                                     │  │
+│   │  └──────────┘  │    ┌──────────────┐    ┌─────────────┐              │  │
+│   │                ├───▶│   Encoder    │───▶│ Preview     │              │  │
+│   │  ┌──────────┐  │    │  (H.264)     │    │ Window      │              │  │
+│   │  │   Mic    │──┘    └──────────────┘    └─────────────┘              │  │
+│   │  └──────────┘              │                                         │  │
+│   │                            ▼                                         │  │
+│   │                      2MB Blobs                                       │  │
+│   │                      3. Send stream end blob                         │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                          │                                   │
+│                                          ▼                                   │
+│                              ┌──────────────────────┐                        │
+│                              │      Streamer        │                        │
+│                              │  - Random namespace  │                        │
+│                              │  - Submit to Celestia│                        │
+│                              └──────────┬───────────┘                        │
+│                                         │                                    │
+└─────────────────────────────────────────┼────────────────────────────────────┘
+                                          │
+                                          ▼
+                               ┌──────────────────────┐
+                               │   Celestia Network   │
+                               │                      │
+                               │   Blobs stored in    │
+                               │   namespace at       │
+                               │   sequential heights │
+                               └──────────┬───────────┘
+                                          │
+┌─────────────────────────────────────────┼────────────────────────────────────┐
+│                              VIEWING    │                                    │
+├─────────────────────────────────────────┼────────────────────────────────────┤
+│                                         ▼                                    │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │                          Viewer                                       │  │
+│   │                                                                       │  │
+│   │  ┌─────────────────┐    ┌──────────────┐    ┌────────────────────┐   │  │
+│   │  │ Background      │───▶│   Decoder    │───▶│  Display (GoCV)    │   │  │
+│   │  │ Blob Fetcher    │    │  (H.264)     │    └────────────────────┘   │  │
+│   │  │ (prefetching)   │    │              │    ┌────────────────────┐   │  │
+│   │  └─────────────────┘    │              │───▶│  Audio Player      │   │  │
+│   │                         └──────────────┘    │  (malgo)           │   │  │
+│   │                                             └────────────────────┘   │  │
+│   │  A/V Sync: Video paced by timestamps, audio plays at sample rate    │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Codec Interface
+
+LOVE uses a pluggable codec architecture. The current implementation is `H264Encoder/Decoder` using ffmpeg, but the interface allows for alternative implementations:
+
+```go
+// Encoder encodes video and audio frames for streaming
+type Encoder interface {
+    EncodeVideo(frame gocv.Mat, timestamp time.Duration, sequence uint32) ([]byte, error)
+    EncodeAudio(samples []byte, timestamp time.Duration, sequence uint32) ([]byte, error)
+    CreateEntrypoint(sampleRate int, channels int, fps int) []byte
+    CreateStreamEnd(totalDuration time.Duration, totalFrames uint32) []byte
+}
+
+// Decoder decodes multiplexed video and audio frames
+type Decoder interface {
+    Decode(data []byte) (*DecodedFrame, int)
+    ParseEntrypoint(data []byte) (sampleRate int, channels int, fps int, valid bool)
+}
 ```
 
 ## Data Format
@@ -134,42 +207,55 @@ Each video/audio frame is prefixed with a header:
 │  Marker   │   Size    │   Timestamp     │   Sequence   │
 │  4 bytes  │  4 bytes  │    8 bytes      │   4 bytes    │
 ├───────────┼───────────┼─────────────────┼──────────────┤
-│ "VIDF" or │  Payload  │  Nanoseconds    │   Frame      │
+│ "H264" or │  Payload  │  Nanoseconds    │   Frame      │
 │ "AUDF"    │  length   │  since start    │   number     │
 └───────────┴───────────┴─────────────────┴──────────────┘
 ```
 
-- **VIDF**: Video frame (JPEG encoded)
+- **H264**: H.264 encoded video frame (may contain multiple NAL units: SPS, PPS, IDR, P-frames)
 - **AUDF**: Audio frame (16-bit PCM samples)
 
 ### Blob Structure
 
-Frames are accumulated into 1MB blobs:
+Frames are accumulated into 2MB blobs (~8 seconds of A/V at 2Mbps video + 128kbps audio):
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    1MB Blob                             │
+│                    2MB Blob                             │
 ├─────────────────────────────────────────────────────────┤
-│ [Header][JPEG Data][Header][PCM Data][Header][JPEG]...  │
+│ [Header][H.264 Data][Header][PCM Data][Header][H.264]...│
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Entrypoint Blob (Audio Streams)
+### Entrypoint Blob
 
-When audio is enabled, an entrypoint blob is submitted first:
+The Capturer sends an entrypoint blob first (before camera initialization) with stream metadata:
 
 ```
-┌───────────┬─────────────┬──────────┬─────────┐
-│  Marker   │ Sample Rate │ Channels │   FPS   │
-│  4 bytes  │   4 bytes   │  1 byte  │ 1 byte  │
-├───────────┼─────────────┼──────────┼─────────┤
-│  "ENTR"   │   44100     │    1     │   30    │
-└───────────┴─────────────┴──────────┴─────────┘
+┌───────────┬─────────────┬──────────┬─────────┬───────┬───────┬────────┐
+│  Marker   │ Sample Rate │ Channels │   FPS   │ Codec │ Width │ Height │
+│  4 bytes  │   4 bytes   │  1 byte  │ 1 byte  │1 byte │2 bytes│2 bytes │
+├───────────┼─────────────┼──────────┼─────────┼───────┼───────┼────────┤
+│  "ENTR"   │   44100     │    1     │   30    │   1   │ 1280  │  720   │
+└───────────┴─────────────┴──────────┴─────────┴───────┴───────┴────────┘
 ```
 
-### Sequenced Blobs
+Codec: 0 = JPEG (legacy), 1 = H.264
 
-For async streaming, each blob is prefixed with an 8-byte sequence number to ensure correct ordering during playback.
+### Stream End Blob
+
+When the stream ends gracefully (ESC or Ctrl+C), the Capturer sends a stream end notification:
+
+```
+┌───────────┬─────────────────────┬──────────────┐
+│  Marker   │  Total Duration     │ Total Frames │
+│  4 bytes  │     8 bytes         │   4 bytes    │
+├───────────┼─────────────────────┼──────────────┤
+│  "ENDS"   │  Nanoseconds        │   Count      │
+└───────────┴─────────────────────┴──────────────┘
+```
+
+This allows viewers to distinguish between "stream ended gracefully" vs "stream stopped unexpectedly".
 
 ## Command Reference
 
@@ -181,9 +267,7 @@ For async streaming, each blob is prefixed with an 8-byte sequence number to ens
 | `-width` | 1280 | Video width (pixels) |
 | `-height` | 720 | Video height (pixels) |
 | `-fps` | 30 | Frames per second |
-| `-quality` | 85 | JPEG quality (1-100) |
-| `-preview` | false | Show local preview |
-| `-audio` | false | Enable audio |
+| `-bitrate` | 2M | H.264 bitrate (e.g., 2M, 4M) |
 | `-samplerate` | 44100 | Audio sample rate (Hz) |
 | `-node` | http://localhost:26658 | Celestia node URL |
 | `-token` | | Auth token (required) |
@@ -192,9 +276,8 @@ For async streaming, each blob is prefixed with an 8-byte sequence number to ens
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-namespace` | | Stream namespace (required) |
+| `-namespace` | | Stream namespace hex (required) |
 | `-height` | | Start block height (required) |
-| `-audio` | false | Enable audio playback |
 | `-node` | http://localhost:26658 | Celestia node URL |
 | `-token` | | Auth token (required) |
 
@@ -202,21 +285,71 @@ For async streaming, each blob is prefixed with an 8-byte sequence number to ens
 
 ### Streaming
 
-1. **Capture**: GoCV grabs frames from webcam, malgo captures audio from microphone
-2. **Encode**: Video frames are JPEG encoded, audio is 16-bit PCM
-3. **Multiplex**: Frames are tagged with VIDF/AUDF markers, timestamps, and sequence numbers
-4. **Chunk**: Data is accumulated into 1MB buffers
-5. **Submit**: Blobs are submitted to Celestia under a randomly generated namespace
+1. **Entrypoint**: Capturer sends entrypoint blob with stream metadata (sample rate, channels, fps, dimensions, codec)
+2. **Initialize**: Capturer opens webcam (GoCV) and microphone (malgo)
+3. **Preview**: Frames are displayed in local preview window (optional)
+4. **Encode**: Video frames are H.264 encoded via ffmpeg (SPS/PPS/IDR combined), audio is 16-bit PCM
+5. **Multiplex**: Frames are tagged with H264/AUDF markers and timestamps
+6. **Chunk**: Data is accumulated into 2MB buffers inside Capturer (~8 seconds of A/V)
+7. **Submit**: Blobs are submitted to Celestia via Streamer with automatic gas estimation
+8. **Stream End**: When stopping gracefully, Capturer sends stream end blob with total duration and frame count
 
 ### Viewing
 
 1. **Connect**: Viewer connects to Celestia node
-2. **Find Entrypoint**: For audio streams, locate the ENTR blob with stream parameters
-3. **Fetch Blobs**: Poll for new blobs at sequential block heights
-4. **Reorder**: Sort incoming blobs by sequence number
-5. **Decode**: Parse frame headers, decode JPEG/PCM data
-6. **Sync**: Use timestamps to synchronize audio and video playback
+2. **Find Entrypoint**: Locate the ENTR blob with stream parameters and codec type
+3. **Create Decoder**: Initialize H.264 decoder based on codec identifier
+4. **Background Fetch**: Goroutine prefetches blobs at sequential block heights into a buffered channel
+5. **Decode**: Parse frame headers, decode H.264 video via ffmpeg, extract PCM audio
+6. **A/V Sync**: Video is paced by timestamps, audio plays at native sample rate through malgo
 7. **Display**: Show video in window, play audio through speakers
+8. **SPS/PPS Caching**: Decoder caches parameter sets for mid-stream joining
+
+## Package Structure
+
+```
+love/
+├── main.go              # CLI entry point
+├── Makefile             # Build and run commands
+├── cmd/
+│   └── chaintest/       # H.264 encode/decode chain test app
+│       └── main.go
+├── lib/
+│   ├── capture/         # Video + audio capture with embedded encoder
+│   │   ├── capture.go   # Capturer implementation
+│   │   └── config.go    # Capture configuration
+│   ├── codec/           # Encoding/decoding interfaces and implementations
+│   │   ├── interface.go # Encoder/Decoder interfaces
+│   │   ├── jpeg.go      # JPEGCodec implementation (legacy)
+│   │   ├── h264_encoder.go # H.264 encoder using ffmpeg
+│   │   ├── h264_decoder.go # H.264 decoder using ffmpeg
+│   │   ├── codec.go     # Shared constants and helpers
+│   │   └── decoder.go   # Frame decoding utilities
+│   ├── streamer/        # Celestia blob submission
+│   │   ├── streamer.go  # Streamer implementation
+│   │   └── config.go    # Streamer configuration
+│   └── viewer/          # Blob fetching + playback with embedded decoder
+│       ├── viewer.go    # Viewer implementation (background fetcher + A/V sync)
+│       └── config.go    # Viewer configuration
+```
+
+## Troubleshooting
+
+### Video not displaying
+- Ensure ffmpeg is installed: `ffmpeg -version`
+- Check if OpenCV/GoCV is properly installed
+
+### Audio not working
+- Linux: Install ALSA dev libraries: `apt install libasound2-dev`
+- Check microphone permissions
+
+### "non-existing PPS referenced" errors
+- This happens when joining mid-stream before a keyframe
+- Wait for the next keyframe or restart from an earlier height
+
+### A/V out of sync
+- Ensure you're using a fresh recording (old recordings may have sync issues)
+- The viewer uses timestamp-based sync - video paced by timestamps, audio at native rate
 
 ## License
 

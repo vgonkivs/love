@@ -3,18 +3,17 @@
 # Binary name
 BINARY := love
 
-# Default values (override with make stream TOKEN=xxx)
-TOKEN ?=
-NODE ?= http://localhost:26658
-CAMERA ?= 0
-WIDTH ?= 1280
-HEIGHT ?= 720
-FPS ?= 30
-QUALITY ?= 85
+# Default values (override with make stream token=xxx)
+token ?=
+node ?= http://localhost:26658
+camera ?= 0
+width ?= 1280
+height ?= 720
+fps ?= 30
 
 # Viewer settings
-NAMESPACE ?=
-START_HEIGHT ?=
+namespace ?=
+start_height ?=
 
 # Build the binary
 build:
@@ -26,56 +25,51 @@ clean:
 
 # Run streamer without preview
 stream: build
-	@if [ -z "$(TOKEN)" ]; then \
-		echo "Error: TOKEN is required. Usage: make stream TOKEN=<auth_token>"; \
+	@if [ -z "$(token)" ]; then \
+		echo "Error: token is required. Usage: make stream token=<auth_token>"; \
 		exit 1; \
 	fi
 	./$(BINARY) stream \
-		-camera $(CAMERA) \
-		-width $(WIDTH) \
-		-height $(HEIGHT) \
-		-fps $(FPS) \
-		-quality $(QUALITY) \
-		-audio $(AUDIO) \
-		-node $(NODE) \
-		-token $(TOKEN) \
+		-camera $(camera) \
+		-width $(width) \
+		-height $(height) \
+		-fps $(fps) \
+		-node $(node) \
+		-token $(token) \
 
 # Run streamer with local preview
 stream-preview: build
-	@if [ -z "$(TOKEN)" ]; then \
-		echo "Error: TOKEN is required. Usage: make stream-preview TOKEN=<auth_token>"; \
+	@if [ -z "$(token)" ]; then \
+		echo "Error: token is required. Usage: make stream-preview token=<auth_token>"; \
 		exit 1; \
 	fi
 	./$(BINARY) stream \
-		-preview \
-		-camera $(CAMERA) \
-		-width $(WIDTH) \
-		-height $(HEIGHT) \
-		-fps $(FPS) \
-		-quality $(QUALITY) \
-		-audio true \
-		-node $(NODE) \
-		-token $(TOKEN) \
+		-camera $(camera) \
+		-width $(width) \
+		-height $(height) \
+		-fps $(fps) \
+		-node $(node) \
+		-token $(token) \
 
 # Run viewer
 view: build
-	@if [ -z "$(TOKEN)" ]; then \
-		echo "Error: TOKEN is required. Usage: make view TOKEN=<auth_token> NAMESPACE=<hex> START_HEIGHT=<height>"; \
+	@if [ -z "$(token)" ]; then \
+		echo "Error: token is required. Usage: make view token=<auth_token> namespace=<hex> start_height=<height>"; \
 		exit 1; \
 	fi
-	@if [ -z "$(NAMESPACE)" ]; then \
-		echo "Error: NAMESPACE is required. Usage: make view TOKEN=<auth_token> NAMESPACE=<hex> START_HEIGHT=<height>"; \
+	@if [ -z "$(namespace)" ]; then \
+		echo "Error: namespace is required. Usage: make view token=<auth_token> namespace=<hex> start_height=<height>"; \
 		exit 1; \
 	fi
-	@if [ -z "$(START_HEIGHT)" ]; then \
-		echo "Error: START_HEIGHT is required. Usage: make view TOKEN=<auth_token> NAMESPACE=<hex> START_HEIGHT=<height>"; \
+	@if [ -z "$(start_height)" ]; then \
+		echo "Error: start_height is required. Usage: make view token=<auth_token> namespace=<hex> start_height=<height>"; \
 		exit 1; \
 	fi
 	./$(BINARY) view \
-		-namespace $(NAMESPACE) \
-		-height $(START_HEIGHT) \
-		-node $(NODE) \
-		-token $(TOKEN)
+		-namespace $(namespace) \
+		-height $(start_height) \
+		-node $(node) \
+		-token $(token)
 
 # Run tests
 test:
@@ -98,31 +92,30 @@ help:
 	@echo "Targets:"
 	@echo "  build           Build the binary"
 	@echo "  clean           Remove build artifacts"
-	@echo "  stream          Run streamer (requires TOKEN)"
-	@echo "  stream-preview  Run streamer with local preview (requires TOKEN)"
-	@echo "  view            Run viewer (requires TOKEN, NAMESPACE, START_HEIGHT)"
+	@echo "  stream          Run streamer (requires token)"
+	@echo "  stream-preview  Run streamer with local preview (requires token)"
+	@echo "  view            Run viewer (requires token, namespace, start_height)"
 	@echo "  test            Run all tests"
 	@echo "  test-cover      Run tests with coverage summary"
 	@echo "  test-cover-html Generate HTML coverage report"
 	@echo "  help            Show this help"
 	@echo ""
-	@echo "Stream variables:"
-	@echo "  TOKEN           Celestia auth token (required)"
-	@echo "  NODE            Celestia node URL (default: http://localhost:26658)"
-	@echo "  CAMERA          Camera device ID (default: 0)"
-	@echo "  WIDTH           Capture width (default: 1280)"
-	@echo "  HEIGHT          Capture height (default: 720)"
-	@echo "  FPS             Frames per second (default: 30)"
-	@echo "  QUALITY         JPEG quality 1-100 (default: 85)"
+	@echo "Variables:"
+	@echo "  token           Celestia auth token (required)"
+	@echo "  node            Celestia node URL (default: http://localhost:26658)"
+	@echo "  camera          Camera device ID (default: 0)"
+	@echo "  width           Capture width (default: 1280)"
+	@echo "  height          Capture height (default: 720)"
+	@echo "  fps             Frames per second (default: 30)"
 	@echo ""
 	@echo "View variables:"
-	@echo "  TOKEN           Celestia auth token (required)"
-	@echo "  NAMESPACE       Stream namespace hex (required)"
-	@echo "  START_HEIGHT    Start block height (required)"
-	@echo "  NODE            Celestia node URL (default: http://localhost:26658)"
+	@echo "  token           Celestia auth token (required)"
+	@echo "  namespace       Stream namespace hex (required)"
+	@echo "  start_height    Start block height (required)"
+	@echo "  node            Celestia node URL (default: http://localhost:26658)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make build"
-	@echo "  make stream TOKEN=eyJhbGc..."
-	@echo "  make stream-preview TOKEN=eyJhbGc... FPS=15 WIDTH=640 HEIGHT=480"
-	@echo "  make view TOKEN=eyJhbGc... NAMESPACE=0a1b2c3d... START_HEIGHT=1234567"
+	@echo "  make stream token=eyJhbGc..."
+	@echo "  make stream-preview token=eyJhbGc... fps=15 width=640 height=480"
+	@echo "  make view token=eyJhbGc... namespace=0a1b2c3d... start_height=1234567"

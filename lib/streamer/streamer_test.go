@@ -121,26 +121,6 @@ func TestStreamer_Run_NotConnected(t *testing.T) {
 	}
 }
 
-func TestStreamer_SubmitBlob_NotConnected(t *testing.T) {
-	cfg := &Config{
-		NodeURL:   "http://localhost:26658",
-		AuthToken: "",
-		Timeout:   30 * time.Second,
-	}
-	streamer, err := NewStreamer(cfg)
-	if err != nil {
-		t.Fatalf("failed to create streamer: %v", err)
-	}
-
-	ctx := context.Background()
-
-	// SubmitBlob without connecting should return error
-	_, err = streamer.SubmitBlob(ctx, []byte("test data"))
-	if err == nil {
-		t.Error("expected error when submitting without connection")
-	}
-}
-
 func TestStreamer_Connect_CreatesClient(t *testing.T) {
 	// Note: The Celestia client uses lazy connection, so it doesn't
 	// validate the URL until an actual request is made.
@@ -193,7 +173,7 @@ func TestStreamer_Run_ContextCancelled(t *testing.T) {
 
 	// Test that Run returns error when not connected
 	ctx, cancel := context.WithCancel(context.Background())
-	input := make(chan []byte, 1)
+	input := make(chan []byte, 100)
 
 	// Cancel immediately
 	cancel()

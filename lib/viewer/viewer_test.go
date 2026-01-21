@@ -11,13 +11,11 @@ import (
 
 func TestNewViewer(t *testing.T) {
 	cfg := &Config{
-		NodeURL:     "http://localhost:26658",
-		AuthToken:   "",
-		BufferSize:  10,
-		WindowName:  "Celestia Live Stream",
-		PollDelay:   500 * time.Millisecond,
-		EnableAudio: false,
-		SampleRate:  44100,
+		NodeURL:    "http://localhost:26658",
+		AuthToken:  "",
+		BufferSize: 10,
+		WindowName: "Celestia Live Stream",
+		PollDelay:  500 * time.Millisecond,
 	}
 
 	// Create a valid namespace hex

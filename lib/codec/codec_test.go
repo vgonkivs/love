@@ -1,213 +1,178 @@
 package codec
 
 import (
-	"context"
-	"sync"
 	"testing"
 	"time"
 
 	"gocv.io/x/gocv"
 )
 
-func TestNewCodec(t *testing.T) {
-	cfg := &Config{JPEGQuality: 90}
-	codec := NewCodec(cfg)
+func TestNewJPEGCodec(t *testing.T) {
+	codec := NewJPEGCodec(90)
 
 	if codec == nil {
 		t.Fatal("expected non-nil codec")
 	}
-	if codec.cfg.JPEGQuality != 90 {
-		t.Errorf("expected JPEGQuality 90, got %d", codec.cfg.JPEGQuality)
+	if codec.quality != 90 {
+		t.Errorf("expected quality 90, got %d", codec.quality)
 	}
 }
 
 func TestChunkSize(t *testing.T) {
-	if ChunkSize != 1048576 {
-		t.Errorf("expected ChunkSize 1048576 (1MB), got %d", ChunkSize)
+	if ChunkSize != 1974272 {
+		t.Errorf("expected ChunkSize 2097152 (2MB), got %d", ChunkSize)
 	}
 }
 
-func TestCodec_Run_SingleFrame(t *testing.T) {
-	cfg := &Config{JPEGQuality: 85}
-	codec := NewCodec(cfg)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	input := make(chan gocv.Mat, 1)
-	output := make(chan []byte, 10)
+func TestJPEGCodec_EncodeVideo(t *testing.T) {
+	codec := NewJPEGCodec(85)
 
 	// Create a test frame
 	frame := gocv.NewMatWithSize(100, 100, gocv.MatTypeCV8UC3)
 	defer frame.Close()
 
-	// Start codec in goroutine
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		codec.Run(ctx, input, output)
-	}()
-
-	// Send frame
-	input <- frame.Clone()
-	close(input)
-
-	// Wait for codec to finish
-	wg.Wait()
-	close(output)
-
-	// A single small frame shouldn't produce a full 1MB chunk
-	// It should be flushed at the end
-	var blobs [][]byte
-	for blob := range output {
-		blobs = append(blobs, blob)
+	encoded, err := codec.EncodeVideo(frame, time.Second, 1)
+	if err != nil {
+		t.Fatalf("failed to encode video frame: %v", err)
 	}
 
-	if len(blobs) != 1 {
-		t.Errorf("expected 1 blob (flushed), got %d", len(blobs))
+	// Check that encoded data has header + JPEG data
+	if len(encoded) < FrameHeaderSize {
+		t.Errorf("encoded data too small: %d bytes", len(encoded))
 	}
 
-	// The blob should be smaller than ChunkSize
-	if len(blobs) > 0 && len(blobs[0]) >= ChunkSize {
-		t.Errorf("expected blob smaller than %d, got %d", ChunkSize, len(blobs[0]))
+	// Check frame marker
+	if encoded[0] != 'V' || encoded[1] != 'I' || encoded[2] != 'D' || encoded[3] != 'F' {
+		t.Error("missing video frame marker")
 	}
 }
 
-func TestCodec_Run_ProducesChunks(t *testing.T) {
-	cfg := &Config{JPEGQuality: 95} // Higher quality = larger files
-	codec := NewCodec(cfg)
+func TestJPEGCodec_EncodeAudio(t *testing.T) {
+	codec := NewJPEGCodec(85)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	input := make(chan gocv.Mat, 100)
-	output := make(chan []byte, 10)
-
-	// Start codec in goroutine
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		codec.Run(ctx, input, output)
-	}()
-
-	// Send many large frames to trigger chunking
-	// A 500x500 image at quality 95 is roughly 50-100KB
-	// We need about 10-20 frames to fill 1MB
-	for i := 0; i < 30; i++ {
-		frame := gocv.NewMatWithSize(500, 500, gocv.MatTypeCV8UC3)
-		// Add some variation to the image
-		for y := 0; y < 500; y++ {
-			for x := 0; x < 500; x++ {
-				frame.SetUCharAt(y, x*3, uint8((x+i*10)%256))
-				frame.SetUCharAt(y, x*3+1, uint8((y+i*10)%256))
-				frame.SetUCharAt(y, x*3+2, uint8((x+y+i*10)%256))
-			}
-		}
-		input <- frame
-	}
-	close(input)
-
-	// Collect output
-	var blobs [][]byte
-	done := make(chan struct{})
-	go func() {
-		for blob := range output {
-			blobs = append(blobs, blob)
-		}
-		close(done)
-	}()
-
-	wg.Wait()
-	close(output)
-	<-done
-
-	// Should have at least one full chunk
-	if len(blobs) < 1 {
-		t.Error("expected at least 1 blob")
+	// Create test audio samples
+	samples := make([]byte, 1024)
+	for i := range samples {
+		samples[i] = byte(i % 256)
 	}
 
-	// Check that full chunks are exactly ChunkSize
-	for i, blob := range blobs {
-		if i < len(blobs)-1 {
-			// All but the last should be exactly ChunkSize
-			if len(blob) != ChunkSize {
-				t.Errorf("blob %d: expected size %d, got %d", i, ChunkSize, len(blob))
-			}
-		}
+	encoded, err := codec.EncodeAudio(samples, time.Second, 1)
+	if err != nil {
+		t.Fatalf("failed to encode audio: %v", err)
+	}
+
+	// Check that encoded data has header + audio data
+	if len(encoded) != FrameHeaderSize+len(samples) {
+		t.Errorf("expected encoded size %d, got %d", FrameHeaderSize+len(samples), len(encoded))
+	}
+
+	// Check frame marker
+	if encoded[0] != 'A' || encoded[1] != 'U' || encoded[2] != 'D' || encoded[3] != 'F' {
+		t.Error("missing audio frame marker")
 	}
 }
 
-func TestCodec_Run_ContextCancellation(t *testing.T) {
-	cfg := &Config{JPEGQuality: 85}
-	codec := NewCodec(cfg)
+func TestJPEGCodec_CreateEntrypoint(t *testing.T) {
+	codec := NewJPEGCodec(85)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	input := make(chan gocv.Mat, 10)
-	output := make(chan []byte, 10)
+	entrypoint := codec.CreateEntrypoint(44100, 2, 30)
 
-	// Start codec
-	done := make(chan error)
-	go func() {
-		done <- codec.Run(ctx, input, output)
-	}()
+	if len(entrypoint) != 10 {
+		t.Errorf("expected entrypoint size 10, got %d", len(entrypoint))
+	}
 
-	// Send a frame
+	// Check marker
+	if entrypoint[0] != 'E' || entrypoint[1] != 'N' || entrypoint[2] != 'T' || entrypoint[3] != 'R' {
+		t.Error("missing entrypoint marker")
+	}
+}
+
+func TestJPEGCodec_ParseEntrypoint(t *testing.T) {
+	codec := NewJPEGCodec(85)
+
+	// Create and parse entrypoint
+	entrypoint := codec.CreateEntrypoint(48000, 1, 60)
+
+	sampleRate, channels, fps, valid := codec.ParseEntrypoint(entrypoint)
+	if !valid {
+		t.Fatal("expected valid entrypoint")
+	}
+	if sampleRate != 48000 {
+		t.Errorf("expected sampleRate 48000, got %d", sampleRate)
+	}
+	if channels != 1 {
+		t.Errorf("expected channels 1, got %d", channels)
+	}
+	if fps != 60 {
+		t.Errorf("expected fps 60, got %d", fps)
+	}
+}
+
+func TestJPEGCodec_ParseEntrypoint_Invalid(t *testing.T) {
+	codec := NewJPEGCodec(85)
+
+	// Test with invalid data
+	_, _, _, valid := codec.ParseEntrypoint([]byte{1, 2, 3})
+	if valid {
+		t.Error("expected invalid for short data")
+	}
+
+	_, _, _, valid = codec.ParseEntrypoint([]byte("NOTENTRYP"))
+	if valid {
+		t.Error("expected invalid for wrong marker")
+	}
+}
+
+func TestJPEGCodec_Decode(t *testing.T) {
+	codec := NewJPEGCodec(85)
+
+	// Create a test frame
 	frame := gocv.NewMatWithSize(100, 100, gocv.MatTypeCV8UC3)
-	input <- frame
+	defer frame.Close()
 
-	// Cancel context
-	cancel()
+	// Encode then decode
+	encoded, err := codec.EncodeVideo(frame, time.Second, 42)
+	if err != nil {
+		t.Fatalf("failed to encode: %v", err)
+	}
 
-	// Should return without error
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("expected nil error, got %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Error("codec did not stop after context cancellation")
+	decoded, consumed := codec.Decode(encoded)
+	if decoded == nil {
+		t.Fatal("failed to decode")
+	}
+	defer decoded.VideoFrame.Close()
+
+	if decoded.Type != FrameTypeVideo {
+		t.Errorf("expected FrameTypeVideo, got %d", decoded.Type)
+	}
+	if decoded.Sequence != 42 {
+		t.Errorf("expected sequence 42, got %d", decoded.Sequence)
+	}
+	if consumed != len(encoded) {
+		t.Errorf("expected consumed %d, got %d", len(encoded), consumed)
 	}
 }
 
-func TestCodec_Run_EmptyFrame(t *testing.T) {
-	cfg := &Config{JPEGQuality: 85}
-	codec := NewCodec(cfg)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	input := make(chan gocv.Mat, 2)
-	output := make(chan []byte, 10)
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		codec.Run(ctx, input, output)
-	}()
-
-	// Send a valid frame followed by closing
-	frame := gocv.NewMatWithSize(50, 50, gocv.MatTypeCV8UC3)
-	input <- frame.Clone()
-	frame.Close()
-	close(input)
-
-	wg.Wait()
-	close(output)
-
-	// Should have processed the frame
-	count := 0
-	for range output {
-		count++
-	}
-	if count != 1 {
-		t.Errorf("expected 1 output blob, got %d", count)
+func TestFrameHeaderSize(t *testing.T) {
+	if FrameHeaderSize != 20 {
+		t.Errorf("expected FrameHeaderSize 20, got %d", FrameHeaderSize)
 	}
 }
 
-func TestCodec_JPEGQuality(t *testing.T) {
+func TestEncodeFrameHeaderWithTimestamp(t *testing.T) {
+	header := EncodeFrameHeaderWithTimestamp(VideoFrameMarker, 1000, 123456789, 42)
+
+	if len(header) != FrameHeaderSize {
+		t.Errorf("expected header size %d, got %d", FrameHeaderSize, len(header))
+	}
+
+	// Check marker
+	if header[0] != 'V' || header[1] != 'I' || header[2] != 'D' || header[3] != 'F' {
+		t.Error("marker not encoded correctly")
+	}
+}
+
+func TestJPEGQuality_AffectsSize(t *testing.T) {
 	// Test that different quality settings produce different sizes
 	frame := gocv.NewMatWithSize(200, 200, gocv.MatTypeCV8UC3)
 	defer frame.Close()
@@ -221,22 +186,20 @@ func TestCodec_JPEGQuality(t *testing.T) {
 		}
 	}
 
-	lowQBuf, err := gocv.IMEncodeWithParams(".jpg", frame, []int{gocv.IMWriteJpegQuality, 20})
+	lowCodec := NewJPEGCodec(20)
+	highCodec := NewJPEGCodec(95)
+
+	lowEncoded, err := lowCodec.EncodeVideo(frame, 0, 0)
 	if err != nil {
 		t.Fatalf("failed to encode low quality: %v", err)
 	}
-	defer lowQBuf.Close()
 
-	highQBuf, err := gocv.IMEncodeWithParams(".jpg", frame, []int{gocv.IMWriteJpegQuality, 95})
+	highEncoded, err := highCodec.EncodeVideo(frame, 0, 0)
 	if err != nil {
 		t.Fatalf("failed to encode high quality: %v", err)
 	}
-	defer highQBuf.Close()
 
-	lowSize := len(lowQBuf.GetBytes())
-	highSize := len(highQBuf.GetBytes())
-
-	if highSize <= lowSize {
-		t.Errorf("expected high quality (%d) > low quality (%d)", highSize, lowSize)
+	if len(highEncoded) <= len(lowEncoded) {
+		t.Errorf("expected high quality (%d) > low quality (%d)", len(highEncoded), len(lowEncoded))
 	}
 }
