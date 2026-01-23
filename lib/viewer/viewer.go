@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	client "github.com/celestiaorg/celestia-openrpc"
-	"github.com/celestiaorg/celestia-openrpc/types/share"
+	"github.com/celestiaorg/celestia-node/api/client"
+	"github.com/celestiaorg/go-square/v3/share"
 	"github.com/gen2brain/malgo"
 	"gocv.io/x/gocv"
 
@@ -21,7 +21,7 @@ type Viewer struct {
 	cfg       *Config
 	decoder   codec.Decoder
 	h264Dec   *codec.H264Decoder // For H.264 streams (needs Start/Close)
-	client    *client.Client
+	client    *client.ReadClient
 	namespace share.Namespace
 	height    uint64
 
@@ -44,7 +44,7 @@ func NewViewer(cfg *Config, namespaceHex string, startHeight uint64) (*Viewer, e
 		return nil, fmt.Errorf("invalid namespace hex: %w", err)
 	}
 
-	namespace, err := share.NamespaceFromBytes(nsBytes)
+	namespace, err := share.NewNamespaceFromBytes(nsBytes)
 	if err != nil {
 		return nil, fmt.Errorf("invalid namespace: %w", err)
 	}
@@ -58,11 +58,15 @@ func NewViewer(cfg *Config, namespaceHex string, startHeight uint64) (*Viewer, e
 
 // Connect establishes connection to Celestia node
 func (v *Viewer) Connect(ctx context.Context) error {
-	c, err := client.NewClient(ctx, v.cfg.NodeURL, v.cfg.AuthToken)
+	cli, err := client.NewReadClient(ctx, client.ReadConfig{
+		BridgeDAAddr: v.cfg.NodeURL,
+		DAAuthToken:  v.cfg.AuthToken,
+		EnableDATLS:  false,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to connect to Celestia node: %w", err)
 	}
-	v.client = c
+	v.client = cli
 	log.Printf("Viewer: connected to Celestia node at %s", v.cfg.NodeURL)
 	return nil
 }
@@ -70,7 +74,7 @@ func (v *Viewer) Connect(ctx context.Context) error {
 // Close closes the connection to Celestia node
 func (v *Viewer) Close() error {
 	if v.client != nil {
-		v.client.Close()
+		return v.client.Close()
 	}
 	return nil
 }
@@ -193,7 +197,7 @@ func (v *Viewer) Run(ctx context.Context) error {
 
 		for _, b := range blobs {
 			// Try to parse as H.264 entrypoint (extended format)
-			sr, ch, f, w, h, h264, valid := codec.ParseH264Entrypoint(b.Data)
+			sr, ch, f, w, h, h264, valid := codec.ParseH264Entrypoint(b.Data())
 			if valid {
 				sampleRate = sr
 				channels = ch
@@ -255,7 +259,7 @@ func (v *Viewer) Run(ctx context.Context) error {
 	_ = fps
 
 	log.Printf("Viewer: starting playback from height %d, namespace: %s",
-		currentHeight, hex.EncodeToString(v.namespace))
+		currentHeight, hex.EncodeToString(v.namespace.Bytes()))
 
 	// Start background blob fetcher
 	blobChan := make(chan []byte, 10) // Buffer up to 10 blobs
@@ -400,16 +404,16 @@ func (v *Viewer) fetchBlobs(ctx context.Context, startHeight uint64, out chan<- 
 
 		for _, b := range blobs {
 			// Skip entrypoint blobs
-			if _, _, _, _, _, _, valid := codec.ParseH264Entrypoint(b.Data); valid {
+			if _, _, _, _, _, _, valid := codec.ParseH264Entrypoint(b.Data()); valid {
 				continue
 			}
 
 			select {
 			case <-ctx.Done():
 				return
-			case out <- b.Data:
+			case out <- b.Data():
 				blobsSent++
-				log.Printf("Fetcher: sent blob %d (%d bytes) from height %d", blobsSent, len(b.Data), currentHeight)
+				log.Printf("Fetcher: sent blob %d (%d bytes) from height %d", blobsSent, len(b.Data()), currentHeight)
 			}
 		}
 
