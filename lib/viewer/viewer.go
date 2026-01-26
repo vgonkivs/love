@@ -24,6 +24,7 @@ type Viewer struct {
 	client    *client.ReadClient
 	namespace share.Namespace
 	height    uint64
+	live      bool // If true, subscribe to live blobs after reading entrypoint
 
 	// Audio player state
 	audioCtx     *malgo.AllocatedContext
@@ -37,7 +38,8 @@ type Viewer struct {
 
 // NewViewer creates a new viewer
 // Decoder is created automatically based on entrypoint blob
-func NewViewer(cfg *Config, namespaceHex string, startHeight uint64) (*Viewer, error) {
+// If live is true, viewer will subscribe to live blobs after reading entrypoint
+func NewViewer(cfg *Config, namespaceHex string, startHeight uint64, live bool) (*Viewer, error) {
 	// Parse namespace from hex
 	nsBytes, err := hex.DecodeString(namespaceHex)
 	if err != nil {
@@ -53,6 +55,7 @@ func NewViewer(cfg *Config, namespaceHex string, startHeight uint64) (*Viewer, e
 		cfg:       cfg,
 		namespace: namespace,
 		height:    startHeight,
+		live:      live,
 	}, nil
 }
 
@@ -173,51 +176,26 @@ func (v *Viewer) Run(ctx context.Context) error {
 		return fmt.Errorf("not connected to Celestia node")
 	}
 
-	currentHeight := v.height
+	// Get entrypoint blob at specified height
+	log.Printf("Viewer: looking for entrypoint blob at height %d", v.height)
 
-	// First, try to read entrypoint blob to detect codec type
-	log.Printf("Viewer: looking for entrypoint blob at height %d", currentHeight)
-	var sampleRate, channels, fps, width, height int
-	var isH264 bool
-	foundEntrypoint := false
+	blobs, err := v.client.Blob.GetAll(ctx, v.height, []share.Namespace{v.namespace})
+	if err != nil {
+		return fmt.Errorf("failed to get blobs at height %d: %w", v.height, err)
+	}
+	if len(blobs) == 0 {
+		return fmt.Errorf("no blobs found at height %d", v.height)
+	}
 
-	for !foundEntrypoint {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
+	sampleRate, channels, width, height, isH264, err := codec.ParseH264Entrypoint(blobs[0].Data())
+	if err != nil {
+		return fmt.Errorf("invalid entrypoint blob at height %d", v.height)
+	}
 
-		blobs, err := v.client.Blob.GetAll(ctx, currentHeight, []share.Namespace{v.namespace})
-		if err != nil || len(blobs) == 0 {
-			// No blobs at this height, move to next immediately
-			currentHeight++
-			continue
-		}
-
-		for _, b := range blobs {
-			// Try to parse as H.264 entrypoint (extended format)
-			sr, ch, f, w, h, h264, valid := codec.ParseH264Entrypoint(b.Data())
-			if valid {
-				sampleRate = sr
-				channels = ch
-				fps = f
-				width = w
-				height = h
-				isH264 = h264
-				foundEntrypoint = true
-				log.Printf("Viewer: found entrypoint - sample rate: %d, channels: %d, fps: %d, codec: %s",
-					sampleRate, channels, fps, map[bool]string{true: "H.264", false: "JPEG"}[isH264])
-				if isH264 {
-					log.Printf("Viewer: video dimensions: %dx%d", width, height)
-				}
-				break
-			}
-		}
-
-		if !foundEntrypoint {
-			currentHeight++
-		}
+	log.Printf("Viewer: found entrypoint at height %d - sample rate: %d, channels: %d, codec: %s",
+		v.height, sampleRate, channels, map[bool]string{true: "H.264", false: "JPEG"}[isH264])
+	if isH264 {
+		log.Printf("Viewer: video dimensions: %dx%d", width, height)
 	}
 
 	// Create decoder based on detected codec type
@@ -238,9 +216,6 @@ func (v *Viewer) Run(ctx context.Context) error {
 		log.Printf("Viewer: JPEG decoder initialized")
 	}
 
-	// Move to next height after entrypoint
-	currentHeight++
-
 	// Create display window
 	window := gocv.NewWindow(v.cfg.WindowName)
 	defer window.Close()
@@ -255,18 +230,19 @@ func (v *Viewer) Run(ctx context.Context) error {
 	videoFrameCount := 0
 	audioChunkCount := 0
 
-	// Unused variable to match expected FPS
-	_ = fps
-
-	log.Printf("Viewer: starting playback from height %d, namespace: %s",
-		currentHeight, hex.EncodeToString(v.namespace.Bytes()))
+	log.Printf("Viewer: starting playback from height %d, namespace: %s, mode: %s",
+		v.height, hex.EncodeToString(v.namespace.Bytes()), map[bool]string{true: "live", false: "historical"}[v.live])
 
 	// Start background blob fetcher
 	blobChan := make(chan []byte, 10) // Buffer up to 10 blobs
 	fetchCtx, fetchCancel := context.WithCancel(ctx)
 	defer fetchCancel()
 
-	go v.fetchBlobs(fetchCtx, currentHeight, blobChan)
+	if v.live {
+		go v.subscribeBlobs(fetchCtx, blobChan)
+	} else {
+		go v.fetchBlobs(fetchCtx, v.height, blobChan)
+	}
 
 	// Playback loop
 	frameBuffer := make([]byte, 0)
@@ -383,7 +359,7 @@ func (v *Viewer) Run(ctx context.Context) error {
 	}
 }
 
-// fetchBlobs fetches blobs in the background and sends data to channel
+// fetchBlobs fetches blobs in the background and sends data to channel (historical mode)
 func (v *Viewer) fetchBlobs(ctx context.Context, startHeight uint64, out chan<- []byte) {
 	defer close(out)
 	currentHeight := startHeight
@@ -403,11 +379,6 @@ func (v *Viewer) fetchBlobs(ctx context.Context, startHeight uint64, out chan<- 
 		}
 
 		for _, b := range blobs {
-			// Skip entrypoint blobs
-			if _, _, _, _, _, _, valid := codec.ParseH264Entrypoint(b.Data()); valid {
-				continue
-			}
-
 			select {
 			case <-ctx.Done():
 				return
@@ -418,5 +389,43 @@ func (v *Viewer) fetchBlobs(ctx context.Context, startHeight uint64, out chan<- 
 		}
 
 		currentHeight++
+	}
+}
+
+// subscribeBlobs subscribes to blobs in live mode and sends data to channel
+func (v *Viewer) subscribeBlobs(ctx context.Context, out chan<- []byte) {
+	defer close(out)
+
+	sub, err := v.client.Blob.Subscribe(ctx, v.namespace)
+	if err != nil {
+		log.Printf("Subscriber: failed to subscribe to blobs: %v", err)
+		return
+	}
+
+	log.Printf("Subscriber: subscribed to namespace %s", hex.EncodeToString(v.namespace.Bytes()))
+	blobsSent := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("Subscriber: stopping, sent %d blobs", blobsSent)
+			return
+		case resp, ok := <-sub:
+			if !ok {
+				log.Printf("Subscriber: subscription channel closed, sent %d blobs", blobsSent)
+				return
+			}
+
+			// Process all blobs in the response
+			for _, b := range resp.Blobs {
+				select {
+				case <-ctx.Done():
+					return
+				case out <- b.Data():
+					blobsSent++
+					log.Printf("Subscriber: sent blob %d (%d bytes) from height %d", blobsSent, len(b.Data()), resp.Height)
+				}
+			}
+		}
 	}
 }

@@ -311,7 +311,7 @@ func (c *Capturer) Run(ctx context.Context, output chan<- []byte) error {
 
 // GetEntrypoint returns the entrypoint blob for this stream
 func (c *Capturer) GetEntrypoint() []byte {
-	return c.encoder.CreateEntrypoint(c.cfg.SampleRate, c.cfg.Channels, c.cfg.FPS)
+	return c.encoder.CreateEntrypoint(c.cfg.SampleRate, c.cfg.Channels)
 }
 
 // sendStreamEnd sends the stream end notification blob

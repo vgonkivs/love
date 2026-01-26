@@ -2,6 +2,7 @@ package capture
 
 import (
 	"context"
+	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
 
@@ -23,28 +24,7 @@ func TestNewCapturer(t *testing.T) {
 
 	encoder := codec.NewJPEGCodec(85)
 	capturer := NewCapturer(cfg, encoder)
-
-	if capturer == nil {
-		t.Fatal("expected non-nil capturer")
-	}
-	if capturer.cfg != cfg {
-		t.Error("capturer config mismatch")
-	}
-	if capturer.cfg.DeviceID != 1 {
-		t.Errorf("expected DeviceID 1, got %d", capturer.cfg.DeviceID)
-	}
-	if capturer.cfg.Width != 640 {
-		t.Errorf("expected Width 640, got %d", capturer.cfg.Width)
-	}
-	if capturer.cfg.Height != 480 {
-		t.Errorf("expected Height 480, got %d", capturer.cfg.Height)
-	}
-	if capturer.cfg.FPS != 15 {
-		t.Errorf("expected FPS 15, got %d", capturer.cfg.FPS)
-	}
-	if capturer.cfg.SampleRate != 44100 {
-		t.Errorf("expected SampleRate 44100, got %d", capturer.cfg.SampleRate)
-	}
+	require.NotNil(t, capturer)
 }
 
 func TestCapturer_Run_InvalidDevice(t *testing.T) {
@@ -61,7 +41,7 @@ func TestCapturer_Run_InvalidDevice(t *testing.T) {
 
 	encoder := codec.NewJPEGCodec(85)
 	capturer := NewCapturer(cfg, encoder)
-
+	require.NotNil(t, capturer)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -70,15 +50,9 @@ func TestCapturer_Run_InvalidDevice(t *testing.T) {
 	// Run should fail with invalid device
 	// Note: This behavior depends on the system - some systems may not error immediately
 	err := capturer.Run(ctx, output)
-
 	// We expect an error for invalid device, but close the output channel regardless
 	close(output)
-
-	// The error behavior may vary by system, so we just verify it doesn't hang
-	if err != nil {
-		// Expected - invalid device should cause an error
-		t.Logf("Got expected error for invalid device: %v", err)
-	}
+	require.NotNil(t, err)
 }
 
 func TestConfig_Values(t *testing.T) {

@@ -80,8 +80,11 @@ make stream token=<auth_token>
 # Stream with custom settings
 make stream token=<auth_token> fps=15 width=640 height=480
 
-# View a stream
+# View a stream (historical playback)
 make view token=<auth_token> namespace=<hex> start_height=<height>
+
+# View a stream (live mode)
+make view token=<auth_token> namespace=<hex> start_height=<height> live=true
 
 # Show help
 make help
@@ -96,8 +99,11 @@ make help
 # Custom settings
 ./love stream -width 1920 -height 1080 -fps 30 -bitrate 4M -samplerate 48000 -token <auth_token>
 
-# View a stream
+# View a stream (historical playback)
 ./love view -namespace <namespace_hex> -height <start_height> -token <auth_token>
+
+# View a stream (live mode - subscribe to new blobs)
+./love view -namespace <namespace_hex> -height <start_height> -live -token <auth_token>
 ```
 
 Press **ESC** to stop streaming or exit viewer.
@@ -185,14 +191,14 @@ LOVE uses a pluggable codec architecture. The current implementation is `H264Enc
 type Encoder interface {
     EncodeVideo(frame gocv.Mat, timestamp time.Duration, sequence uint32) ([]byte, error)
     EncodeAudio(samples []byte, timestamp time.Duration, sequence uint32) ([]byte, error)
-    CreateEntrypoint(sampleRate int, channels int, fps int) []byte
+    CreateEntrypoint(sampleRate int, channels int) []byte
     CreateStreamEnd(totalDuration time.Duration, totalFrames uint32) []byte
 }
 
 // Decoder decodes multiplexed video and audio frames
 type Decoder interface {
     Decode(data []byte) (*DecodedFrame, int)
-    ParseEntrypoint(data []byte) (sampleRate int, channels int, fps int, valid bool)
+    ParseEntrypoint(data []byte) (sampleRate int, channels int, err error)
 }
 ```
 
@@ -232,12 +238,12 @@ Frames are accumulated into 2MB blobs (~8 seconds of A/V at 2Mbps video + 128kbp
 The Capturer sends an entrypoint blob first (before camera initialization) with stream metadata:
 
 ```
-┌───────────┬─────────────┬──────────┬─────────┬───────┬───────┬────────┐
-│  Marker   │ Sample Rate │ Channels │   FPS   │ Codec │ Width │ Height │
-│  4 bytes  │   4 bytes   │  1 byte  │ 1 byte  │1 byte │2 bytes│2 bytes │
-├───────────┼─────────────┼──────────┼─────────┼───────┼───────┼────────┤
-│  "ENTR"   │   44100     │    1     │   30    │   1   │ 1280  │  720   │
-└───────────┴─────────────┴──────────┴─────────┴───────┴───────┴────────┘
+┌───────────┬─────────────┬──────────┬───────┬───────┬────────┐
+│  Marker   │ Sample Rate │ Channels │ Codec │ Width │ Height │
+│  4 bytes  │   4 bytes   │  1 byte  │1 byte │2 bytes│2 bytes │
+├───────────┼─────────────┼──────────┼───────┼───────┼────────┤
+│  "ENTR"   │   44100     │    1     │   1   │ 1280  │  720   │
+└───────────┴─────────────┴──────────┴───────┴───────┴────────┘
 ```
 
 Codec: 0 = JPEG (legacy), 1 = H.264
@@ -277,7 +283,8 @@ This allows viewers to distinguish between "stream ended gracefully" vs "stream 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-namespace` | | Stream namespace hex (required) |
-| `-height` | | Start block height (required) |
+| `-height` | | Block height of entrypoint blob (required) |
+| `-live` | false | Subscribe to live blobs (instead of historical playback) |
 | `-node` | http://localhost:26658 | Celestia node URL |
 | `-token` | | Auth token (required) |
 
@@ -285,7 +292,7 @@ This allows viewers to distinguish between "stream ended gracefully" vs "stream 
 
 ### Streaming
 
-1. **Entrypoint**: Capturer sends entrypoint blob with stream metadata (sample rate, channels, fps, dimensions, codec)
+1. **Entrypoint**: Capturer sends entrypoint blob with stream metadata (sample rate, channels, dimensions, codec)
 2. **Initialize**: Capturer opens webcam (GoCV) and microphone (malgo)
 3. **Preview**: Frames are displayed in local preview window (optional)
 4. **Encode**: Video frames are H.264 encoded via ffmpeg (SPS/PPS/IDR combined), audio is 16-bit PCM
@@ -297,9 +304,11 @@ This allows viewers to distinguish between "stream ended gracefully" vs "stream 
 ### Viewing
 
 1. **Connect**: Viewer connects to Celestia node
-2. **Find Entrypoint**: Locate the ENTR blob with stream parameters and codec type
+2. **Find Entrypoint**: Locate the ENTR blob at specified height with stream parameters and codec type
 3. **Create Decoder**: Initialize H.264 decoder based on codec identifier
-4. **Background Fetch**: Goroutine prefetches blobs at sequential block heights into a buffered channel
+4. **Background Fetch**:
+   - **Historical mode** (default): Goroutine fetches blobs at sequential block heights
+   - **Live mode** (`-live` flag): Goroutine subscribes to new blobs via `blob.Subscribe`
 5. **Decode**: Parse frame headers, decode H.264 video via ffmpeg, extract PCM audio
 6. **A/V Sync**: Video is paced by timestamps, audio plays at native sample rate through malgo
 7. **Display**: Show video in window, play audio through speakers

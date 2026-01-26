@@ -66,13 +66,15 @@ func printUsage() {
 	fmt.Println()
 	fmt.Println("View options:")
 	fmt.Println("  -namespace string  Stream namespace (hex)")
-	fmt.Println("  -height uint       Start block height")
+	fmt.Println("  -height uint       Block height of entrypoint blob")
+	fmt.Println("  -live              Subscribe to live blobs (instead of historical playback)")
 	fmt.Println("  -node string       Celestia node URL (default http://localhost:26658)")
 	fmt.Println("  -token string      Celestia node auth token")
 	fmt.Println()
 	fmt.Println("Examples:")
 	fmt.Println("  love stream -token <auth_token>")
 	fmt.Println("  love view -namespace 0a1b2c... -height 1234567 -token <auth_token>")
+	fmt.Println("  love view -namespace 0a1b2c... -height 1234567 -live -token <auth_token>")
 }
 
 func runStream(args []string) {
@@ -178,7 +180,8 @@ func runView(args []string) {
 
 	// Required options
 	namespace := fs.String("namespace", "", "Stream namespace (hex)")
-	startHeight := fs.Uint64("height", 0, "Start block height")
+	startHeight := fs.Uint64("height", 0, "Block height of entrypoint blob")
+	live := fs.Bool("live", false, "Subscribe to live blobs (instead of historical playback)")
 
 	// Celestia options
 	nodeURL := fs.String("node", "http://localhost:26658", "Celestia node URL")
@@ -218,7 +221,7 @@ func runView(args []string) {
 		PollDelay:  500 * time.Millisecond,
 	}
 
-	v, err := viewer.NewViewer(viewerCfg, *namespace, *startHeight)
+	v, err := viewer.NewViewer(viewerCfg, *namespace, *startHeight, *live)
 	if err != nil {
 		log.Fatalf("Failed to create viewer: %v", err)
 	}

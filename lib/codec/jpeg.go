@@ -3,6 +3,7 @@ package codec
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"time"
 
 	"gocv.io/x/gocv"
@@ -50,13 +51,12 @@ func (c *JPEGCodec) EncodeAudio(samples []byte, timestamp time.Duration, sequenc
 }
 
 // CreateEntrypoint creates the metadata blob for stream start
-// Format: ENTR (4 bytes) + sample_rate (4 bytes) + channels (1 byte) + fps (1 byte)
-func (c *JPEGCodec) CreateEntrypoint(sampleRate int, channels int, fps int) []byte {
-	data := make([]byte, 10)
+// Format: ENTR (4 bytes) + sample_rate (4 bytes) + channels (1 byte)
+func (c *JPEGCodec) CreateEntrypoint(sampleRate int, channels int) []byte {
+	data := make([]byte, 9)
 	copy(data[:4], EntrypointMarker)
 	binary.LittleEndian.PutUint32(data[4:8], uint32(sampleRate))
 	data[8] = byte(channels)
-	data[9] = byte(fps)
 	return data
 }
 
@@ -67,17 +67,16 @@ func (c *JPEGCodec) Decode(data []byte) (*DecodedFrame, int) {
 }
 
 // ParseEntrypoint extracts metadata from entrypoint blob
-func (c *JPEGCodec) ParseEntrypoint(data []byte) (sampleRate int, channels int, fps int, valid bool) {
-	if len(data) < 10 {
-		return 0, 0, 0, false
+func (c *JPEGCodec) ParseEntrypoint(data []byte) (sampleRate int, channels int, err error) {
+	if len(data) < 9 {
+		return 0, 0, fmt.Errorf("invalid JPEG entrypoint frame")
 	}
 	if !bytes.Equal(data[:4], EntrypointMarker) {
-		return 0, 0, 0, false
+		return 0, 0, fmt.Errorf("not an entrypoint blob")
 	}
 	sampleRate = int(binary.LittleEndian.Uint32(data[4:8]))
 	channels = int(data[8])
-	fps = int(data[9])
-	return sampleRate, channels, fps, true
+	return sampleRate, channels, nil
 }
 
 // EntrypointMarker for entrypoint blobs

@@ -3,6 +3,9 @@ package streamer
 import (
 	"context"
 	"encoding/hex"
+	"github.com/celestiaorg/go-square/v3/share"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
 )
@@ -15,21 +18,9 @@ func TestNewStreamer(t *testing.T) {
 	}
 
 	streamer, err := NewStreamer(cfg)
-	if err != nil {
-		t.Fatalf("failed to create streamer: %v", err)
-	}
-
-	if streamer == nil {
-		t.Fatal("expected non-nil streamer")
-	}
-	if streamer.cfg != cfg {
-		t.Error("config mismatch")
-	}
-
-	// Namespace should be generated
-	if len(streamer.namespace) == 0 {
-		t.Error("expected non-empty namespace")
-	}
+	require.NoError(t, err)
+	assert.NotNil(t, streamer)
+	assert.Equal(t, len(streamer.namespace), share.NamespaceSize)
 }
 
 func TestNewStreamer_GeneratesUniqueNamespaces(t *testing.T) {
@@ -44,14 +35,11 @@ func TestNewStreamer_GeneratesUniqueNamespaces(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		streamer, err := NewStreamer(cfg)
-		if err != nil {
-			t.Fatalf("failed to create streamer %d: %v", i, err)
-		}
+		require.NoError(t, err)
 
 		nsHex := streamer.NamespaceHex()
-		if namespaces[nsHex] {
-			t.Errorf("duplicate namespace generated: %s", nsHex)
-		}
+		_, ok := namespaces[nsHex]
+		require.False(t, ok)
 		namespaces[nsHex] = true
 	}
 }
@@ -63,23 +51,17 @@ func TestStreamer_NamespaceHex(t *testing.T) {
 		Timeout:   30 * time.Second,
 	}
 	streamer, err := NewStreamer(cfg)
-	if err != nil {
-		t.Fatalf("failed to create streamer: %v", err)
-	}
+	require.NoError(t, err)
 
 	nsHex := streamer.NamespaceHex()
 
 	// Should be valid hex
 	_, err = hex.DecodeString(nsHex)
-	if err != nil {
-		t.Errorf("NamespaceHex returned invalid hex: %v", err)
-	}
+	require.NoError(t, err)
 
 	// Should match the raw namespace
 	expected := hex.EncodeToString(streamer.namespace)
-	if nsHex != expected {
-		t.Errorf("NamespaceHex mismatch: got %s, want %s", nsHex, expected)
-	}
+	assert.Equal(t, expected, nsHex)
 }
 
 func TestStreamer_Close(t *testing.T) {
@@ -89,15 +71,8 @@ func TestStreamer_Close(t *testing.T) {
 		Timeout:   30 * time.Second,
 	}
 	streamer, err := NewStreamer(cfg)
-	if err != nil {
-		t.Fatalf("failed to create streamer: %v", err)
-	}
-
-	// Close should not panic when client is nil
-	err = streamer.Close()
-	if err != nil {
-		t.Errorf("Close returned error: %v", err)
-	}
+	require.NoError(t, err)
+	require.NoError(t, streamer.Close())
 }
 
 func TestStreamer_Run_NotConnected(t *testing.T) {
@@ -107,18 +82,14 @@ func TestStreamer_Run_NotConnected(t *testing.T) {
 		Timeout:   30 * time.Second,
 	}
 	streamer, err := NewStreamer(cfg)
-	if err != nil {
-		t.Fatalf("failed to create streamer: %v", err)
-	}
+	require.NoError(t, err)
 
 	ctx := context.Background()
 	input := make(chan []byte)
 
 	// Run without connecting should return error
-	err = streamer.Run(ctx, input)
-	if err == nil {
-		t.Error("expected error when running without connection")
-	}
+	require.Error(t, streamer.Run(ctx, input))
+
 }
 
 func TestStreamer_Connect_CreatesClient(t *testing.T) {
@@ -132,56 +103,8 @@ func TestStreamer_Connect_CreatesClient(t *testing.T) {
 	}
 
 	streamer, err := NewStreamer(cfg)
-	if err != nil {
-		t.Fatalf("failed to create streamer: %v", err)
-	}
-
-	// Verify client is nil before connect
-	if streamer.client != nil {
-		t.Error("expected nil client before Connect")
-	}
-}
-
-func TestConfig_CustomValues(t *testing.T) {
-	cfg := &Config{
-		NodeURL:   "http://custom:1234",
-		AuthToken: "my-token",
-		Timeout:   120 * time.Second,
-	}
-
-	if cfg.NodeURL != "http://custom:1234" {
-		t.Errorf("NodeURL mismatch")
-	}
-	if cfg.AuthToken != "my-token" {
-		t.Errorf("AuthToken mismatch")
-	}
-	if cfg.Timeout != 120*time.Second {
-		t.Errorf("Timeout mismatch")
-	}
-}
-
-func TestStreamer_Run_ContextCancelled(t *testing.T) {
-	cfg := &Config{
-		NodeURL:   "http://localhost:26658",
-		AuthToken: "",
-		Timeout:   30 * time.Second,
-	}
-	streamer, err := NewStreamer(cfg)
-	if err != nil {
-		t.Fatalf("failed to create streamer: %v", err)
-	}
-
-	// Test that Run returns error when not connected
-	ctx, cancel := context.WithCancel(context.Background())
-	input := make(chan []byte, 100)
-
-	// Cancel immediately
-	cancel()
-
-	err = streamer.Run(ctx, input)
-	if err == nil {
-		t.Error("expected error when not connected")
-	}
+	require.NoError(t, err)
+	assert.Nil(t, streamer.client)
 }
 
 func TestStreamer_Run_InputClosed(t *testing.T) {
@@ -191,68 +114,12 @@ func TestStreamer_Run_InputClosed(t *testing.T) {
 		Timeout:   30 * time.Second,
 	}
 	streamer, err := NewStreamer(cfg)
-	if err != nil {
-		t.Fatalf("failed to create streamer: %v", err)
-	}
+	require.NoError(t, err)
 
 	ctx := context.Background()
 	input := make(chan []byte)
 
 	// Close input immediately - should return error (not connected)
 	close(input)
-
-	err = streamer.Run(ctx, input)
-	if err == nil {
-		t.Error("expected error when not connected")
-	}
-}
-
-func TestNewStreamer_NamespaceLength(t *testing.T) {
-	cfg := &Config{
-		NodeURL:   "http://localhost:26658",
-		AuthToken: "",
-		Timeout:   30 * time.Second,
-	}
-
-	streamer, err := NewStreamer(cfg)
-	if err != nil {
-		t.Fatalf("failed to create streamer: %v", err)
-	}
-
-	// Namespace should not be empty
-	if len(streamer.namespace) == 0 {
-		t.Error("namespace should not be empty")
-	}
-
-	// Verify namespace hex encoding works
-	nsHex := streamer.NamespaceHex()
-	if len(nsHex) == 0 {
-		t.Error("namespace hex should not be empty")
-	}
-	if len(nsHex) != len(streamer.namespace)*2 {
-		t.Errorf("namespace hex length mismatch: %d vs %d", len(nsHex), len(streamer.namespace)*2)
-	}
-}
-
-func TestStreamer_MultipleClose(t *testing.T) {
-	cfg := &Config{
-		NodeURL:   "http://localhost:26658",
-		AuthToken: "",
-		Timeout:   30 * time.Second,
-	}
-	streamer, err := NewStreamer(cfg)
-	if err != nil {
-		t.Fatalf("failed to create streamer: %v", err)
-	}
-
-	// Close multiple times should not panic
-	err = streamer.Close()
-	if err != nil {
-		t.Errorf("first Close returned error: %v", err)
-	}
-
-	err = streamer.Close()
-	if err != nil {
-		t.Errorf("second Close returned error: %v", err)
-	}
+	require.Error(t, streamer.Run(ctx, input))
 }

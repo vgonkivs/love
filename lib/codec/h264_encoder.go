@@ -346,17 +346,16 @@ func (e *H264Encoder) EncodeAudio(samples []byte, timestamp time.Duration, seque
 }
 
 // CreateEntrypoint creates the metadata blob for stream start
-// Format: ENTR (4 bytes) + sample_rate (4 bytes) + channels (1 byte) + fps (1 byte) + codec (1 byte) + width (2 bytes) + height (2 bytes)
+// Format: ENTR (4 bytes) + sample_rate (4 bytes) + channels (1 byte) + codec (1 byte) + width (2 bytes) + height (2 bytes)
 // Codec: 0 = JPEG, 1 = H.264
-func (e *H264Encoder) CreateEntrypoint(sampleRate int, channels int, fps int) []byte {
-	data := make([]byte, 15) // Extended format with codec and dimensions
+func (e *H264Encoder) CreateEntrypoint(sampleRate int, channels int) []byte {
+	data := make([]byte, 14) // Extended format with codec and dimensions
 	copy(data[:4], EntrypointMarker)
 	binary.LittleEndian.PutUint32(data[4:8], uint32(sampleRate))
 	data[8] = byte(channels)
-	data[9] = byte(fps)
-	data[10] = 1 // H.264 codec identifier
-	binary.LittleEndian.PutUint16(data[11:13], uint16(e.width))
-	binary.LittleEndian.PutUint16(data[13:15], uint16(e.height))
+	data[9] = 1 // H.264 codec identifier
+	binary.LittleEndian.PutUint16(data[10:12], uint16(e.width))
+	binary.LittleEndian.PutUint16(data[12:14], uint16(e.height))
 	return data
 }
 

@@ -14,6 +14,7 @@ fps ?= 30
 # Viewer settings
 namespace ?=
 start_height ?=
+live ?=
 
 # Build the binary
 build:
@@ -69,7 +70,8 @@ view: build
 		-namespace $(namespace) \
 		-height $(start_height) \
 		-node $(node) \
-		-token $(token)
+		-token $(token) \
+		$(if $(filter true 1,$(live)),-live,)
 
 # Run tests
 test:
@@ -111,7 +113,8 @@ help:
 	@echo "View variables:"
 	@echo "  token           Celestia auth token (required)"
 	@echo "  namespace       Stream namespace hex (required)"
-	@echo "  start_height    Start block height (required)"
+	@echo "  start_height    Block height of entrypoint blob (required)"
+	@echo "  live            Subscribe to live blobs (set to true for live mode)"
 	@echo "  node            Celestia node URL (default: http://localhost:26658)"
 	@echo ""
 	@echo "Examples:"
@@ -119,3 +122,4 @@ help:
 	@echo "  make stream token=eyJhbGc..."
 	@echo "  make stream-preview token=eyJhbGc... fps=15 width=640 height=480"
 	@echo "  make view token=eyJhbGc... namespace=0a1b2c3d... start_height=1234567"
+	@echo "  make view token=eyJhbGc... namespace=0a1b2c3d... start_height=1234567 live=true"

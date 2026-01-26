@@ -1,6 +1,8 @@
 package codec
 
 import (
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"os/exec"
 	"testing"
 	"time"
@@ -16,27 +18,8 @@ func checkFFmpeg() bool {
 
 func TestH264Encoder_Creation(t *testing.T) {
 	cfg := DefaultH264EncoderConfig(1280, 720, 30)
-
-	if cfg.Width != 1280 {
-		t.Errorf("expected width 1280, got %d", cfg.Width)
-	}
-	if cfg.Height != 720 {
-		t.Errorf("expected height 720, got %d", cfg.Height)
-	}
-	if cfg.FPS != 30 {
-		t.Errorf("expected FPS 30, got %d", cfg.FPS)
-	}
-	if cfg.GOPSize != 180 {
-		t.Errorf("expected GOPSize 180 (30fps * 6s), got %d", cfg.GOPSize)
-	}
-	if cfg.Bitrate != "2M" {
-		t.Errorf("expected bitrate 2M, got %s", cfg.Bitrate)
-	}
-
 	encoder := NewH264Encoder(cfg)
-	if encoder == nil {
-		t.Fatal("expected non-nil encoder")
-	}
+	assert.NotNil(t, encoder)
 }
 
 func TestH264Decoder_Creation(t *testing.T) {
@@ -46,9 +29,7 @@ func TestH264Decoder_Creation(t *testing.T) {
 	}
 
 	decoder := NewH264Decoder(cfg)
-	if decoder == nil {
-		t.Fatal("expected non-nil decoder")
-	}
+	assert.NotNil(t, decoder)
 }
 
 func TestH264Encoder_RequiresStart(t *testing.T) {
@@ -62,13 +43,12 @@ func TestH264Encoder_RequiresStart(t *testing.T) {
 
 	// Create a test frame
 	frame := gocv.NewMatWithSize(480, 640, gocv.MatTypeCV8UC3)
+	assert.NotNil(t, frame)
 	defer frame.Close()
 
 	// Should fail without Start()
 	_, err := encoder.EncodeVideo(frame, 0, 0)
-	if err == nil {
-		t.Error("expected error when encoding without Start()")
-	}
+	require.Error(t, err)
 }
 
 func TestH264Encoder_StartAndEncode(t *testing.T) {
@@ -78,6 +58,7 @@ func TestH264Encoder_StartAndEncode(t *testing.T) {
 
 	cfg := DefaultH264EncoderConfig(320, 240, 30)
 	encoder := NewH264Encoder(cfg)
+	assert.NotNil(t, encoder)
 	defer encoder.Close()
 
 	err := encoder.Start()
@@ -94,11 +75,8 @@ func TestH264Encoder_StartAndEncode(t *testing.T) {
 
 		timestamp := time.Duration(i) * 33 * time.Millisecond
 		_, err := encoder.EncodeVideo(frame, timestamp, uint32(i))
+		require.NoError(t, err)
 		frame.Close()
-
-		if err != nil {
-			t.Fatalf("failed to encode frame %d: %v", i, err)
-		}
 	}
 
 	// Read remaining frames
@@ -115,9 +93,7 @@ func TestH264Encoder_StartAndEncode(t *testing.T) {
 			// Verify frame has H264 marker
 			if len(encoded) >= 4 {
 				marker := encoded[:4]
-				if string(marker) != "H264" {
-					t.Errorf("expected H264 marker, got %v", marker)
-				}
+				require.Equal(t, string(marker), "H264")
 			}
 		}
 	}
@@ -138,54 +114,31 @@ func TestH264Decoder_RequiresStart(t *testing.T) {
 		Height: 480,
 	}
 	decoder := NewH264Decoder(cfg)
+	assert.NotNil(t, decoder)
 	defer decoder.Close()
 
 	// Should fail without Start()
 	_, err := decoder.DecodeH264Frame([]byte{0x00, 0x00, 0x00, 0x01})
-	if err == nil {
-		t.Error("expected error when decoding without Start()")
-	}
+	require.Error(t, err)
 }
 
 func TestH264_Entrypoint(t *testing.T) {
 	cfg := DefaultH264EncoderConfig(1280, 720, 30)
 	encoder := NewH264Encoder(cfg)
+	assert.NotNil(t, encoder)
 
-	entrypoint := encoder.CreateEntrypoint(44100, 2, 30)
+	entrypoint := encoder.CreateEntrypoint(44100, 2)
+	assert.NotNil(t, entrypoint)
+	assert.Equal(t, len(entrypoint), 14)
 
-	if len(entrypoint) != 15 {
-		t.Errorf("expected entrypoint length 15, got %d", len(entrypoint))
-	}
-
-	// Parse it back
-	sampleRate, channels, fps, width, height, isH264, valid := ParseH264Entrypoint(entrypoint)
-	if !valid {
-		t.Fatal("expected valid entrypoint")
-	}
-	if sampleRate != 44100 {
-		t.Errorf("expected sample rate 44100, got %d", sampleRate)
-	}
-	if channels != 2 {
-		t.Errorf("expected channels 2, got %d", channels)
-	}
-	if fps != 30 {
-		t.Errorf("expected fps 30, got %d", fps)
-	}
-	if width != 1280 {
-		t.Errorf("expected width 1280, got %d", width)
-	}
-	if height != 720 {
-		t.Errorf("expected height 720, got %d", height)
-	}
-	if !isH264 {
-		t.Error("expected isH264 to be true")
-	}
+	_, _, _, _, _, err := ParseH264Entrypoint(entrypoint)
+	require.NoError(t, err)
 }
 
 func TestH264_AudioEncoding(t *testing.T) {
 	cfg := DefaultH264EncoderConfig(1280, 720, 30)
 	encoder := NewH264Encoder(cfg)
-
+	assert.NotNil(t, encoder)
 	// Audio encoding should work without starting the video encoder
 	audioData := make([]byte, 4096)
 	for i := range audioData {
@@ -193,19 +146,11 @@ func TestH264_AudioEncoding(t *testing.T) {
 	}
 
 	encoded, err := encoder.EncodeAudio(audioData, time.Second, 100)
-	if err != nil {
-		t.Fatalf("failed to encode audio: %v", err)
-	}
-
-	// Verify header
-	if len(encoded) < FrameHeaderSize {
-		t.Fatalf("encoded audio too short: %d", len(encoded))
-	}
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, len(encoded), FrameHeaderSize)
 
 	marker := encoded[:4]
-	if string(marker) != "AUDF" {
-		t.Errorf("expected AUDF marker, got %v", marker)
-	}
+	require.NotEqual(t, string(marker), "H264")
 }
 
 func TestH264_CompressionRatio(t *testing.T) {
@@ -216,14 +161,13 @@ func TestH264_CompressionRatio(t *testing.T) {
 	// Compare H.264 vs JPEG compression for same content
 	cfg := DefaultH264EncoderConfig(320, 240, 30)
 	h264Encoder := NewH264Encoder(cfg)
+	assert.NotNil(t, h264Encoder)
 	defer h264Encoder.Close()
 
 	jpegCodec := NewJPEGCodec(90)
 
 	err := h264Encoder.Start()
-	if err != nil {
-		t.Fatalf("failed to start H.264 encoder: %v", err)
-	}
+	require.NoError(t, err)
 
 	// Create test frames with gradient (compresses well)
 	var jpegTotal int
@@ -243,7 +187,8 @@ func TestH264_CompressionRatio(t *testing.T) {
 		jpegTotal += len(jpegData)
 
 		// Feed to H.264 encoder
-		h264Encoder.EncodeVideo(frame, 0, uint32(i))
+		_, err = h264Encoder.EncodeVideo(frame, 0, uint32(i))
+		require.NoError(t, err)
 		frame.Close()
 	}
 

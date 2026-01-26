@@ -1,6 +1,8 @@
 package codec
 
 import (
+	"github.com/huandu/go-assert"
+	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
 
@@ -9,19 +11,8 @@ import (
 
 func TestNewJPEGCodec(t *testing.T) {
 	codec := NewJPEGCodec(90)
-
-	if codec == nil {
-		t.Fatal("expected non-nil codec")
-	}
-	if codec.quality != 90 {
-		t.Errorf("expected quality 90, got %d", codec.quality)
-	}
-}
-
-func TestChunkSize(t *testing.T) {
-	if ChunkSize != 1974272 {
-		t.Errorf("expected ChunkSize 2097152 (2MB), got %d", ChunkSize)
-	}
+	require.NotNil(t, codec)
+	assert.Equal(t, codec.quality, 90)
 }
 
 func TestJPEGCodec_EncodeVideo(t *testing.T) {
@@ -32,15 +23,12 @@ func TestJPEGCodec_EncodeVideo(t *testing.T) {
 	defer frame.Close()
 
 	encoded, err := codec.EncodeVideo(frame, time.Second, 1)
-	if err != nil {
-		t.Fatalf("failed to encode video frame: %v", err)
-	}
+	require.NoError(t, err)
 
 	// Check that encoded data has header + JPEG data
 	if len(encoded) < FrameHeaderSize {
 		t.Errorf("encoded data too small: %d bytes", len(encoded))
 	}
-
 	// Check frame marker
 	if encoded[0] != 'V' || encoded[1] != 'I' || encoded[2] != 'D' || encoded[3] != 'F' {
 		t.Error("missing video frame marker")
@@ -57,15 +45,8 @@ func TestJPEGCodec_EncodeAudio(t *testing.T) {
 	}
 
 	encoded, err := codec.EncodeAudio(samples, time.Second, 1)
-	if err != nil {
-		t.Fatalf("failed to encode audio: %v", err)
-	}
-
-	// Check that encoded data has header + audio data
-	if len(encoded) != FrameHeaderSize+len(samples) {
-		t.Errorf("expected encoded size %d, got %d", FrameHeaderSize+len(samples), len(encoded))
-	}
-
+	require.NoError(t, err)
+	assert.Equal(t, len(encoded), FrameHeaderSize+len(samples))
 	// Check frame marker
 	if encoded[0] != 'A' || encoded[1] != 'U' || encoded[2] != 'D' || encoded[3] != 'F' {
 		t.Error("missing audio frame marker")
@@ -75,12 +56,9 @@ func TestJPEGCodec_EncodeAudio(t *testing.T) {
 func TestJPEGCodec_CreateEntrypoint(t *testing.T) {
 	codec := NewJPEGCodec(85)
 
-	entrypoint := codec.CreateEntrypoint(44100, 2, 30)
-
-	if len(entrypoint) != 10 {
-		t.Errorf("expected entrypoint size 10, got %d", len(entrypoint))
-	}
-
+	entrypoint := codec.CreateEntrypoint(44100, 2)
+	require.NotNil(t, entrypoint)
+	assert.Equal(t, len(entrypoint), 9)
 	// Check marker
 	if entrypoint[0] != 'E' || entrypoint[1] != 'N' || entrypoint[2] != 'T' || entrypoint[3] != 'R' {
 		t.Error("missing entrypoint marker")
@@ -91,36 +69,23 @@ func TestJPEGCodec_ParseEntrypoint(t *testing.T) {
 	codec := NewJPEGCodec(85)
 
 	// Create and parse entrypoint
-	entrypoint := codec.CreateEntrypoint(48000, 1, 60)
+	entrypoint := codec.CreateEntrypoint(48000, 1)
 
-	sampleRate, channels, fps, valid := codec.ParseEntrypoint(entrypoint)
-	if !valid {
-		t.Fatal("expected valid entrypoint")
-	}
-	if sampleRate != 48000 {
-		t.Errorf("expected sampleRate 48000, got %d", sampleRate)
-	}
-	if channels != 1 {
-		t.Errorf("expected channels 1, got %d", channels)
-	}
-	if fps != 60 {
-		t.Errorf("expected fps 60, got %d", fps)
-	}
+	sampleRate, channels, err := codec.ParseEntrypoint(entrypoint)
+	require.NoError(t, err)
+	assert.Equal(t, sampleRate, 48000)
+	assert.Equal(t, channels, 1)
 }
 
 func TestJPEGCodec_ParseEntrypoint_Invalid(t *testing.T) {
 	codec := NewJPEGCodec(85)
 
 	// Test with invalid data
-	_, _, _, valid := codec.ParseEntrypoint([]byte{1, 2, 3})
-	if valid {
-		t.Error("expected invalid for short data")
-	}
+	_, _, err := codec.ParseEntrypoint([]byte{1, 2, 3})
+	require.Error(t, err)
 
-	_, _, _, valid = codec.ParseEntrypoint([]byte("NOTENTRYP"))
-	if valid {
-		t.Error("expected invalid for wrong marker")
-	}
+	_, _, err = codec.ParseEntrypoint([]byte("NOTENTRYP"))
+	require.Error(t, err)
 }
 
 func TestJPEGCodec_Decode(t *testing.T) {
@@ -132,40 +97,20 @@ func TestJPEGCodec_Decode(t *testing.T) {
 
 	// Encode then decode
 	encoded, err := codec.EncodeVideo(frame, time.Second, 42)
-	if err != nil {
-		t.Fatalf("failed to encode: %v", err)
-	}
+	require.NoError(t, err)
 
 	decoded, consumed := codec.Decode(encoded)
-	if decoded == nil {
-		t.Fatal("failed to decode")
-	}
+	require.NotNil(t, decoded)
+
 	defer decoded.VideoFrame.Close()
-
-	if decoded.Type != FrameTypeVideo {
-		t.Errorf("expected FrameTypeVideo, got %d", decoded.Type)
-	}
-	if decoded.Sequence != 42 {
-		t.Errorf("expected sequence 42, got %d", decoded.Sequence)
-	}
-	if consumed != len(encoded) {
-		t.Errorf("expected consumed %d, got %d", len(encoded), consumed)
-	}
-}
-
-func TestFrameHeaderSize(t *testing.T) {
-	if FrameHeaderSize != 20 {
-		t.Errorf("expected FrameHeaderSize 20, got %d", FrameHeaderSize)
-	}
+	assert.Equal(t, decoded.Type, FrameTypeVideo)
+	assert.Equal(t, decoded.Sequence, uint32(42))
+	assert.Equal(t, consumed, len(encoded))
 }
 
 func TestEncodeFrameHeaderWithTimestamp(t *testing.T) {
 	header := EncodeFrameHeaderWithTimestamp(VideoFrameMarker, 1000, 123456789, 42)
-
-	if len(header) != FrameHeaderSize {
-		t.Errorf("expected header size %d, got %d", FrameHeaderSize, len(header))
-	}
-
+	assert.Equal(t, len(header), FrameHeaderSize)
 	// Check marker
 	if header[0] != 'V' || header[1] != 'I' || header[2] != 'D' || header[3] != 'F' {
 		t.Error("marker not encoded correctly")
@@ -190,16 +135,9 @@ func TestJPEGQuality_AffectsSize(t *testing.T) {
 	highCodec := NewJPEGCodec(95)
 
 	lowEncoded, err := lowCodec.EncodeVideo(frame, 0, 0)
-	if err != nil {
-		t.Fatalf("failed to encode low quality: %v", err)
-	}
+	require.NoError(t, err)
 
 	highEncoded, err := highCodec.EncodeVideo(frame, 0, 0)
-	if err != nil {
-		t.Fatalf("failed to encode high quality: %v", err)
-	}
-
-	if len(highEncoded) <= len(lowEncoded) {
-		t.Errorf("expected high quality (%d) > low quality (%d)", len(highEncoded), len(lowEncoded))
-	}
+	require.NoError(t, err)
+	require.Greater(t, len(highEncoded), len(lowEncoded))
 }

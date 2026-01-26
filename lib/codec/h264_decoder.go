@@ -30,11 +30,11 @@ type H264Decoder struct {
 	closeMu     sync.Mutex
 
 	// Cached SPS/PPS for mid-stream joining
-	sps     []byte
-	pps     []byte
-	spsPps  []byte // Combined SPS+PPS to prepend
-	spsMu   sync.Mutex
-	hasSPS  bool
+	sps    []byte
+	pps    []byte
+	spsPps []byte // Combined SPS+PPS to prepend
+	spsMu  sync.Mutex
+	hasSPS bool
 }
 
 // H264DecoderConfig holds configuration for the H.264 decoder
@@ -170,9 +170,9 @@ func getNALType(data []byte) int {
 
 // NAL unit types
 const (
-	nalTypeSPS = 7  // Sequence Parameter Set
-	nalTypePPS = 8  // Picture Parameter Set
-	nalTypeIDR = 5  // IDR frame (keyframe)
+	nalTypeSPS = 7 // Sequence Parameter Set
+	nalTypePPS = 8 // Picture Parameter Set
+	nalTypeIDR = 5 // IDR frame (keyframe)
 )
 
 // DecodeH264Frame decodes raw H.264 NAL unit data (without our header)
@@ -375,34 +375,33 @@ func (d *H264Decoder) DrainFrames() []*gocv.Mat {
 
 // ParseEntrypoint implements the Decoder interface
 // Uses the extended H.264 entrypoint format
-func (d *H264Decoder) ParseEntrypoint(data []byte) (sampleRate int, channels int, fps int, valid bool) {
-	sr, ch, f, _, _, _, v := ParseH264Entrypoint(data)
-	return sr, ch, f, v
+func (d *H264Decoder) ParseEntrypoint(data []byte) (sampleRate int, channels int, err error) {
+	sr, ch, _, _, _, err := ParseH264Entrypoint(data)
+	return sr, ch, err
 }
 
 // ParseH264Entrypoint extracts metadata from H.264 entrypoint blob
 // Extended format includes codec identifier and dimensions
-func ParseH264Entrypoint(data []byte) (sampleRate int, channels int, fps int, width int, height int, isH264 bool, valid bool) {
-	if len(data) < 10 {
-		return 0, 0, 0, 0, 0, false, false
+func ParseH264Entrypoint(data []byte) (sampleRate int, channels int, width int, height int, isH264 bool, err error) {
+	if len(data) < 9 {
+		return 0, 0, 0, 0, false, fmt.Errorf("invalid H264 entrypoint length")
 	}
 	if !bytes.Equal(data[:4], EntrypointMarker) {
-		return 0, 0, 0, 0, 0, false, false
+		return 0, 0, 0, 0, false, fmt.Errorf("not an entrypoint blob")
 	}
 	sampleRate = int(binary.LittleEndian.Uint32(data[4:8]))
 	channels = int(data[8])
-	fps = int(data[9])
 
 	// Check for codec identifier (extended format)
-	if len(data) >= 11 {
-		isH264 = data[10] == 1
+	if len(data) >= 10 {
+		isH264 = data[9] == 1
 	}
 
 	// Check for dimensions (H.264 extended format)
-	if len(data) >= 15 {
-		width = int(binary.LittleEndian.Uint16(data[11:13]))
-		height = int(binary.LittleEndian.Uint16(data[13:15]))
+	if len(data) >= 14 {
+		width = int(binary.LittleEndian.Uint16(data[10:12]))
+		height = int(binary.LittleEndian.Uint16(data[12:14]))
 	}
 
-	return sampleRate, channels, fps, width, height, isH264, true
+	return sampleRate, channels, width, height, isH264, nil
 }

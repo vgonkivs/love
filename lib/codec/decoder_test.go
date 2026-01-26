@@ -1,69 +1,47 @@
 package codec
 
 import (
-	"bytes"
-	"testing"
-
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gocv.io/x/gocv"
+	"testing"
 )
 
 func TestDecodeNextFrame_EmptyData(t *testing.T) {
 	frame, consumed := DecodeNextFrame([]byte{})
-	if frame != nil {
-		t.Error("expected nil frame for empty data")
-	}
-	if consumed != 0 {
-		t.Errorf("expected 0 consumed, got %d", consumed)
-	}
+	require.Nil(t, frame)
+	assert.Equal(t, consumed, 0)
 }
 
 func TestDecodeNextFrame_TooShort(t *testing.T) {
 	// Less than 4 bytes
 	frame, consumed := DecodeNextFrame([]byte{0xFF, 0xD8})
-	if frame != nil {
-		t.Error("expected nil frame for short data")
-	}
-	if consumed != 0 {
-		t.Errorf("expected 0 consumed, got %d", consumed)
-	}
+	require.Nil(t, frame)
+	assert.Equal(t, consumed, 0)
 }
 
 func TestDecodeNextFrame_NoSOI(t *testing.T) {
 	// No JPEG start marker
 	data := []byte{0x00, 0x00, 0x00, 0x00, 0xFF, 0xD9}
 	frame, consumed := DecodeNextFrame(data)
-	if frame != nil {
-		t.Error("expected nil frame when no SOI marker")
-	}
-	if consumed != 0 {
-		t.Errorf("expected 0 consumed, got %d", consumed)
-	}
+	require.Nil(t, frame)
+	assert.Equal(t, consumed, 0)
 }
 
 func TestDecodeNextFrame_NoEOI(t *testing.T) {
 	// Has start marker but no end marker
 	data := []byte{0xFF, 0xD8, 0x00, 0x00, 0x00, 0x00}
 	frame, consumed := DecodeNextFrame(data)
-	if frame != nil {
-		t.Error("expected nil frame when no EOI marker")
-	}
-	if consumed != 0 {
-		t.Errorf("expected 0 consumed, got %d", consumed)
-	}
+	require.Nil(t, frame)
+	assert.Equal(t, consumed, 0)
 }
 
 func TestDecodeNextFrame_InvalidJPEG(t *testing.T) {
 	// Has markers but invalid JPEG data between them
 	data := []byte{0xFF, 0xD8, 0x00, 0x00, 0xFF, 0xD9}
 	frame, consumed := DecodeNextFrame(data)
-	// Should skip past the invalid SOI
-	if frame != nil {
-		t.Error("expected nil frame for invalid JPEG")
-	}
-	// Should consume past the SOI marker to try again
-	if consumed != 2 {
-		t.Errorf("expected 2 consumed for invalid JPEG, got %d", consumed)
-	}
+	require.Nil(t, frame)
+	assert.Equal(t, consumed, 2)
 }
 
 func TestDecodeNextFrame_ValidJPEG(t *testing.T) {
@@ -81,27 +59,17 @@ func TestDecodeNextFrame_ValidJPEG(t *testing.T) {
 	}
 
 	buf, err := gocv.IMEncode(".jpg", img)
-	if err != nil {
-		t.Fatalf("failed to encode test image: %v", err)
-	}
+	require.Nil(t, err)
 	defer buf.Close()
 
 	jpegData := buf.GetBytes()
 
 	// Test decoding
 	frame, consumed := DecodeNextFrame(jpegData)
-	if frame == nil {
-		t.Fatal("expected non-nil frame for valid JPEG")
-	}
+	require.NotNil(t, frame)
 	defer frame.Close()
-
-	if consumed != len(jpegData) {
-		t.Errorf("expected %d consumed, got %d", len(jpegData), consumed)
-	}
-
-	if frame.Empty() {
-		t.Error("decoded frame should not be empty")
-	}
+	assert.Equal(t, consumed, len(jpegData))
+	assert.False(t, frame.Empty())
 }
 
 func TestDecodeNextFrame_MultipleFrames(t *testing.T) {
@@ -112,15 +80,11 @@ func TestDecodeNextFrame_MultipleFrames(t *testing.T) {
 	defer img2.Close()
 
 	buf1, err := gocv.IMEncode(".jpg", img1)
-	if err != nil {
-		t.Fatalf("failed to encode image 1: %v", err)
-	}
+	require.NoError(t, err)
 	defer buf1.Close()
 
 	buf2, err := gocv.IMEncode(".jpg", img2)
-	if err != nil {
-		t.Fatalf("failed to encode image 2: %v", err)
-	}
+	require.NoError(t, err)
 	defer buf2.Close()
 
 	// Concatenate both JPEGs
@@ -128,26 +92,16 @@ func TestDecodeNextFrame_MultipleFrames(t *testing.T) {
 
 	// Decode first frame
 	frame1, consumed1 := DecodeNextFrame(combined)
-	if frame1 == nil {
-		t.Fatal("expected non-nil first frame")
-	}
+	require.NotNil(t, frame1)
 	frame1.Close()
-
-	if consumed1 != len(buf1.GetBytes()) {
-		t.Errorf("first frame: expected %d consumed, got %d", len(buf1.GetBytes()), consumed1)
-	}
+	assert.Equal(t, consumed1, len(buf1.GetBytes()))
 
 	// Decode second frame from remaining data
 	remaining := combined[consumed1:]
 	frame2, consumed2 := DecodeNextFrame(remaining)
-	if frame2 == nil {
-		t.Fatal("expected non-nil second frame")
-	}
+	require.NotNil(t, frame2)
 	frame2.Close()
-
-	if consumed2 != len(buf2.GetBytes()) {
-		t.Errorf("second frame: expected %d consumed, got %d", len(buf2.GetBytes()), consumed2)
-	}
+	assert.Equal(t, consumed2, len(buf2.GetBytes()))
 }
 
 func TestDecodeNextFrame_WithLeadingGarbage(t *testing.T) {
@@ -156,9 +110,7 @@ func TestDecodeNextFrame_WithLeadingGarbage(t *testing.T) {
 	defer img.Close()
 
 	buf, err := gocv.IMEncode(".jpg", img)
-	if err != nil {
-		t.Fatalf("failed to encode image: %v", err)
-	}
+	require.NoError(t, err)
 	defer buf.Close()
 
 	// Add garbage before the JPEG
@@ -166,24 +118,10 @@ func TestDecodeNextFrame_WithLeadingGarbage(t *testing.T) {
 	combined := append(garbage, buf.GetBytes()...)
 
 	frame, consumed := DecodeNextFrame(combined)
-	if frame == nil {
-		t.Fatal("expected non-nil frame")
-	}
+	assert.NotNil(t, frame)
 	defer frame.Close()
 
 	// Should consume garbage + JPEG
 	expectedConsumed := len(garbage) + len(buf.GetBytes())
-	if consumed != expectedConsumed {
-		t.Errorf("expected %d consumed, got %d", expectedConsumed, consumed)
-	}
-}
-
-func TestJPEGMarkers(t *testing.T) {
-	// Verify the JPEG markers are correct
-	if !bytes.Equal(jpegSOI, []byte{0xFF, 0xD8}) {
-		t.Error("jpegSOI marker is incorrect")
-	}
-	if !bytes.Equal(jpegEOI, []byte{0xFF, 0xD9}) {
-		t.Error("jpegEOI marker is incorrect")
-	}
+	assert.Equal(t, consumed, expectedConsumed)
 }

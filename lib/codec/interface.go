@@ -15,7 +15,7 @@ type Encoder interface {
 	EncodeAudio(samples []byte, timestamp time.Duration, sequence uint32) ([]byte, error)
 
 	// CreateEntrypoint creates the metadata blob for stream start
-	CreateEntrypoint(sampleRate int, channels int, fps int) []byte
+	CreateEntrypoint(sampleRate int, channels int) []byte
 
 	// CreateStreamEnd creates the stream end notification blob
 	CreateStreamEnd(totalDuration time.Duration, totalFrames uint32) []byte
@@ -27,5 +27,5 @@ type Decoder interface {
 	Decode(data []byte) (*DecodedFrame, int)
 
 	// ParseEntrypoint extracts metadata from entrypoint blob
-	ParseEntrypoint(data []byte) (sampleRate int, channels int, fps int, valid bool)
+	ParseEntrypoint(data []byte) (sampleRate int, channels int, err error)
 }

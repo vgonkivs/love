@@ -7,6 +7,8 @@ require (
 	github.com/celestiaorg/celestia-openrpc v0.5.0
 	github.com/celestiaorg/go-square/v3 v3.0.2
 	github.com/gen2brain/malgo v0.11.24
+	github.com/huandu/go-assert v1.1.5
+	github.com/stretchr/testify v1.11.1
 	github.com/yapingcat/gomedia v0.0.0-20240906162731-17feea57090c
 	gocv.io/x/gocv v0.42.0
 )
@@ -300,7 +302,6 @@ require (
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/spf13/viper v1.21.0 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.5.0 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20220721030215-126854af5e6d // indirect
 	github.com/tendermint/go-amino v0.16.0 // indirect
