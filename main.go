@@ -69,13 +69,15 @@ func printUsage() {
 	fmt.Println()
 	fmt.Println("View options:")
 	fmt.Println("  -namespace string  Stream namespace (hex)")
-	fmt.Println("  -height uint       Start block height")
+	fmt.Println("  -height uint       Start block height (contains entrypoint blob)")
 	fmt.Println("  -node string       Celestia node URL (default http://localhost:26658)")
 	fmt.Println("  -token string      Celestia node auth token")
+	fmt.Println("  -live              Subscribe to live stream (skip historical blobs)")
 	fmt.Println()
 	fmt.Println("Examples:")
 	fmt.Println("  love stream -pop-api-key <key> -pop-key-id <id> -grpc <consensus:9090> -chain-id mocha-4")
 	fmt.Println("  love view -namespace 0a1b2c... -height 1234567 -token <auth_token>")
+	fmt.Println("  love view -namespace 0a1b2c... -height 1234567 -token <auth_token> -live")
 }
 
 func runStream(args []string) {
@@ -192,6 +194,7 @@ func runView(args []string) {
 	// Celestia options
 	nodeURL := fs.String("node", "http://localhost:26658", "Celestia node URL")
 	authToken := fs.String("token", "", "Celestia node auth token")
+	live := fs.Bool("live", false, "Subscribe to live blobs instead of replaying from start height")
 
 	fs.Parse(args)
 
@@ -225,6 +228,7 @@ func runView(args []string) {
 		BufferSize: 10,
 		WindowName: "Celestia Live Stream",
 		PollDelay:  500 * time.Millisecond,
+		Live:       *live,
 	}
 
 	v, err := viewer.NewViewer(viewerCfg, *namespace, *startHeight)
@@ -239,7 +243,11 @@ func runView(args []string) {
 	}
 	defer v.Close()
 
-	log.Printf("Subscribing to namespace at height %d...", *startHeight)
+	if *live {
+		log.Printf("Live mode: fetching entrypoint at height %d, then subscribing to new blobs...", *startHeight)
+	} else {
+		log.Printf("Subscribing to namespace at height %d...", *startHeight)
+	}
 	log.Println("Press ESC to exit")
 
 	if err := v.Run(ctx); err != nil {
