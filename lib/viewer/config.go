@@ -9,4 +9,5 @@ type Config struct {
 	BufferSize int           // Number of blobs to buffer
 	WindowName string        // Display window title
 	PollDelay  time.Duration // Delay between height polls
+	Live       bool          // Subscribe to new blobs instead of polling historical heights
 }

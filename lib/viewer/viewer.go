@@ -190,6 +190,9 @@ func (v *Viewer) Run(ctx context.Context) error {
 
 		blobs, err := v.client.Blob.GetAll(ctx, currentHeight, []share.Namespace{v.namespace})
 		if err != nil || len(blobs) == 0 {
+			if v.cfg.Live {
+				return fmt.Errorf("no entrypoint blob found at height %d", currentHeight)
+			}
 			// No blobs at this height, move to next immediately
 			currentHeight++
 			continue
@@ -216,6 +219,9 @@ func (v *Viewer) Run(ctx context.Context) error {
 		}
 
 		if !foundEntrypoint {
+			if v.cfg.Live {
+				return fmt.Errorf("no entrypoint blob found at height %d", currentHeight)
+			}
 			currentHeight++
 		}
 	}
@@ -266,7 +272,11 @@ func (v *Viewer) Run(ctx context.Context) error {
 	fetchCtx, fetchCancel := context.WithCancel(ctx)
 	defer fetchCancel()
 
-	go v.fetchBlobs(fetchCtx, currentHeight, blobChan)
+	if v.cfg.Live {
+		go v.fetchBlobsLive(fetchCtx, blobChan)
+	} else {
+		go v.fetchBlobs(fetchCtx, currentHeight, blobChan)
+	}
 
 	// Playback loop
 	frameBuffer := make([]byte, 0)
@@ -380,6 +390,45 @@ func (v *Viewer) Run(ctx context.Context) error {
 		}
 
 		frameBuffer = frameBuffer[consumed:]
+	}
+}
+
+// fetchBlobsLive subscribes to new blobs and sends data to channel in real-time
+func (v *Viewer) fetchBlobsLive(ctx context.Context, out chan<- []byte) {
+	defer close(out)
+
+	sub, err := v.client.Blob.Subscribe(ctx, v.namespace)
+	if err != nil {
+		log.Printf("Fetcher: failed to subscribe to blobs: %v", err)
+		return
+	}
+	log.Println("Fetcher: subscribed to live blobs")
+
+	blobsSent := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case resp, ok := <-sub:
+			if !ok {
+				log.Println("Fetcher: subscription channel closed")
+				return
+			}
+			for _, b := range resp.Blobs {
+				// Skip entrypoint blobs
+				if _, _, _, _, _, _, valid := codec.ParseH264Entrypoint(b.Data()); valid {
+					continue
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+				case out <- b.Data():
+					blobsSent++
+					log.Printf("Fetcher: sent blob %d (%d bytes) from height %d", blobsSent, len(b.Data()), resp.Height)
+				}
+			}
+		}
 	}
 }
 
