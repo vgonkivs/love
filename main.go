@@ -61,8 +61,11 @@ func printUsage() {
 	fmt.Println("  -bitrate string    H.264 bitrate (default 2M)")
 	fmt.Println("  -no-preview        Disable local preview window")
 	fmt.Println("  -samplerate int    Audio sample rate in Hz (default 44100)")
-	fmt.Println("  -node string       Celestia node URL (default http://localhost:26658)")
-	fmt.Println("  -token string      Celestia node auth token")
+	fmt.Println("  -grpc string       Consensus node gRPC address (default localhost:9090)")
+	fmt.Println("  -chain-id string   Celestia chain ID (default mocha-4)")
+	fmt.Println("  -pop-api-key string  POPSigner API key")
+	fmt.Println("  -pop-key-id string   POPSigner key name or ID")
+	fmt.Println("  -gas-price float   Gas price in utia (default 0 = use default min gas price)")
 	fmt.Println()
 	fmt.Println("View options:")
 	fmt.Println("  -namespace string  Stream namespace (hex)")
@@ -71,7 +74,7 @@ func printUsage() {
 	fmt.Println("  -token string      Celestia node auth token")
 	fmt.Println()
 	fmt.Println("Examples:")
-	fmt.Println("  love stream -token <auth_token>")
+	fmt.Println("  love stream -pop-api-key <key> -pop-key-id <id> -grpc <consensus:9090> -chain-id mocha-4")
 	fmt.Println("  love view -namespace 0a1b2c... -height 1234567 -token <auth_token>")
 }
 
@@ -91,9 +94,12 @@ func runStream(args []string) {
 	// Codec options
 	bitrate := fs.String("bitrate", "2M", "H.264 bitrate (e.g., 2M, 4M)")
 
-	// Celestia options
-	nodeURL := fs.String("node", "http://localhost:26658", "Celestia node URL")
-	authToken := fs.String("token", "", "Celestia node auth token")
+	// POPSigner / gRPC options
+	grpcAddr := fs.String("grpc", "localhost:9090", "Consensus node gRPC address")
+	chainID := fs.String("chain-id", "mocha-4", "Celestia chain ID")
+	popAPIKey := fs.String("pop-api-key", "", "POPSigner API key")
+	popKeyID := fs.String("pop-key-id", "", "POPSigner key name or ID")
+	gasPrice := fs.Float64("gas-price", 0, "Gas price in utia (0 = use default min gas price)")
 
 	fs.Parse(args)
 
@@ -136,8 +142,11 @@ func runStream(args []string) {
 
 	// Create streamer
 	streamerCfg := &streamer.Config{
-		NodeURL:   *nodeURL,
-		AuthToken: *authToken,
+		GRPCAddress:     *grpcAddr,
+		PopSignerAPIKey: *popAPIKey,
+		PopSignerKeyID:  *popKeyID,
+		ChainID:         *chainID,
+		GasPrice:        *gasPrice,
 	}
 	str, err := streamer.NewStreamer(streamerCfg)
 	if err != nil {
