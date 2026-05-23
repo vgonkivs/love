@@ -269,3 +269,66 @@ func TestH264_CompressionRatio(t *testing.T) {
 		t.Log("H.264 encoder produced no output (may need more frames)")
 	}
 }
+
+// TestH264Decoder_IDRGate verifies that DecodeH264Frame drops slice/IDR
+// NAL units until the decoder has been primed with SPS+PPS+IDR — the
+// common mid-GOP-join scenario in live mode. Without the gate, ffmpeg
+// would receive undecodable bytes and silently emit nothing.
+func TestH264Decoder_IDRGate(t *testing.T) {
+	if !checkFFmpeg() {
+		t.Skip("ffmpeg not available")
+	}
+
+	dec := NewH264Decoder(H264DecoderConfig{Width: 640, Height: 480})
+	if err := dec.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer dec.Close()
+
+	// Minimal NAL units. Payload bytes are irrelevant to the gate
+	// (which decides solely on the NAL type in the header byte).
+	pSlice := []byte{0x00, 0x00, 0x00, 0x01, 0x21, 0x00} // nal_unit_type=1
+	idr := []byte{0x00, 0x00, 0x00, 0x01, 0x65, 0x00}    // nal_unit_type=5
+	sps := []byte{0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e}
+	pps := []byte{0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x38, 0x80}
+
+	// Pre-prime: lone P-slice must be dropped, not errored.
+	if _, err := dec.DecodeH264Frame(pSlice); err != nil {
+		t.Fatalf("P-slice before priming: expected silent drop, got error: %v", err)
+	}
+	if dec.hasSPS {
+		t.Fatal("hasSPS must remain false after a lone P-slice")
+	}
+
+	// IDR without cached SPS/PPS is undecodable — must also be dropped.
+	if _, err := dec.DecodeH264Frame(idr); err != nil {
+		t.Fatalf("IDR before SPS/PPS: expected silent drop, got error: %v", err)
+	}
+	if dec.hasSPS {
+		t.Fatal("hasSPS must remain false on IDR without cached SPS/PPS")
+	}
+
+	// SPS+PPS cached but no IDR yet — still not primed.
+	if _, err := dec.DecodeH264Frame(sps); err != nil {
+		t.Fatalf("SPS: %v", err)
+	}
+	if _, err := dec.DecodeH264Frame(pps); err != nil {
+		t.Fatalf("PPS: %v", err)
+	}
+	if dec.hasSPS {
+		t.Fatal("hasSPS must not flip until an IDR follows SPS+PPS")
+	}
+
+	// IDR after cached SPS+PPS primes the decoder.
+	if _, err := dec.DecodeH264Frame(idr); err != nil {
+		t.Fatalf("IDR after SPS+PPS: %v", err)
+	}
+	if !dec.hasSPS {
+		t.Fatal("hasSPS must be set after SPS+PPS+IDR triplet")
+	}
+
+	// Post-prime: P-slices now flow through.
+	if _, err := dec.DecodeH264Frame(pSlice); err != nil {
+		t.Fatalf("P-slice after priming: %v", err)
+	}
+}
