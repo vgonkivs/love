@@ -274,6 +274,51 @@ func (e *H264Encoder) EncodeVideo(frame gocv.Mat, timestamp time.Duration, seque
 	}
 }
 
+// DrainRawNALs returns all currently buffered NAL units without the
+// custom frame wrapper. Intended for callers that mux the NALs into
+// a container (e.g. MPEG-TS) and apply their own timestamping.
+func (e *H264Encoder) DrainRawNALs() [][]byte {
+	var nals [][]byte
+	for {
+		select {
+		case nal, ok := <-e.encodedChan:
+			if !ok {
+				return nals
+			}
+			nals = append(nals, nal)
+		default:
+			return nals
+		}
+	}
+}
+
+// WriteFrame feeds a raw video frame to the encoder without draining or
+// wrapping the output. Pair with DrainRawNALs for muxed pipelines.
+func (e *H264Encoder) WriteFrame(frame gocv.Mat) error {
+	e.closeMu.Lock()
+	if e.closed {
+		e.closeMu.Unlock()
+		return fmt.Errorf("encoder is closed")
+	}
+	if !e.started {
+		e.closeMu.Unlock()
+		return fmt.Errorf("encoder not started, call Start() first")
+	}
+	e.closeMu.Unlock()
+
+	data := frame.ToBytes()
+	expectedSize := e.width * e.height * 3
+	if len(data) != expectedSize {
+		return fmt.Errorf("frame size mismatch: got %d, expected %d", len(data), expectedSize)
+	}
+
+	if _, err := e.stdin.Write(data); err != nil {
+		return fmt.Errorf("failed to write frame: %w", err)
+	}
+	e.frameCount++
+	return nil
+}
+
 // ReadEncodedFrameTimeout reads with timeout
 func (e *H264Encoder) ReadEncodedFrameTimeout(timestamp time.Duration, sequence uint32, timeout time.Duration) ([]byte, error) {
 	select {
@@ -354,7 +399,7 @@ func (e *H264Encoder) CreateEntrypoint(sampleRate int, channels int, fps int) []
 	binary.LittleEndian.PutUint32(data[4:8], uint32(sampleRate))
 	data[8] = byte(channels)
 	data[9] = byte(fps)
-	data[10] = 1 // H.264 codec identifier
+	data[10] = CodecIDH264
 	binary.LittleEndian.PutUint16(data[11:13], uint16(e.width))
 	binary.LittleEndian.PutUint16(data[13:15], uint16(e.height))
 	return data

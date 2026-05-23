@@ -23,11 +23,24 @@ import (
 // posted in this namespace.
 const liveEntrypointSearchWindow = 100
 
+// codecName renders the entrypoint codec ID as a human-readable label.
+func codecName(id byte) string {
+	switch id {
+	case codec.CodecIDTS:
+		return "MPEG-TS (H.264+AAC)"
+	case codec.CodecIDH264:
+		return "H.264"
+	default:
+		return "JPEG"
+	}
+}
+
 // Viewer subscribes to Celestia blobs and plays video/audio in real-time
 type Viewer struct {
 	cfg       *Config
 	decoder   codec.Decoder
-	h264Dec   *codec.H264Decoder // For H.264 streams (needs Start/Close)
+	h264Dec   *codec.H264Decoder // For raw H.264 streams (needs Start/Close)
+	tsDec     *codec.TSDecoder   // For MPEG-TS streams (needs Start/Close)
 	client    *client.ReadClient
 	namespace share.Namespace
 	height    uint64
@@ -218,7 +231,7 @@ func (v *Viewer) Run(ctx context.Context) error {
 	// common: user picks the wrong block) doesn't make -live exit fatally.
 	log.Printf("Viewer: looking for entrypoint blob at height %d", currentHeight)
 	var sampleRate, channels, fps, width, height int
-	var isH264 bool
+	var codecID byte
 	foundEntrypoint := false
 
 	for !foundEntrypoint {
@@ -239,19 +252,18 @@ func (v *Viewer) Run(ctx context.Context) error {
 		}
 
 		for _, b := range blobs {
-			// Try to parse as H.264 entrypoint (extended format)
-			sr, ch, f, w, h, h264, valid := codec.ParseH264Entrypoint(b.Data())
+			sr, ch, f, w, h, cid, valid := codec.ParseH264Entrypoint(b.Data())
 			if valid {
 				sampleRate = sr
 				channels = ch
 				fps = f
 				width = w
 				height = h
-				isH264 = h264
+				codecID = cid
 				foundEntrypoint = true
 				log.Printf("Viewer: found entrypoint at height %d - sample rate: %d, channels: %d, fps: %d, codec: %s",
-					currentHeight, sampleRate, channels, fps, map[bool]string{true: "H.264", false: "JPEG"}[isH264])
-				if isH264 {
+					currentHeight, sampleRate, channels, fps, codecName(codecID))
+				if codecID == codec.CodecIDH264 || codecID == codec.CodecIDTS {
 					log.Printf("Viewer: video dimensions: %dx%d", width, height)
 				}
 				break
@@ -267,19 +279,29 @@ func (v *Viewer) Run(ctx context.Context) error {
 	}
 
 	// Create decoder based on detected codec type
-	if isH264 {
-		decoderCfg := codec.H264DecoderConfig{
-			Width:  width,
-			Height: height,
+	switch codecID {
+	case codec.CodecIDTS:
+		v.tsDec = codec.NewTSDecoder(codec.TSDecoderConfig{
+			Width:      width,
+			Height:     height,
+			SampleRate: sampleRate,
+			Channels:   channels,
+		})
+		if err := v.tsDec.Start(); err != nil {
+			return fmt.Errorf("failed to start TS decoder: %w", err)
 		}
-		v.h264Dec = codec.NewH264Decoder(decoderCfg)
-		v.decoder = v.h264Dec
+		defer v.tsDec.Close()
+		v.decoder = v.tsDec
+		log.Printf("Viewer: MPEG-TS decoder started")
+	case codec.CodecIDH264:
+		v.h264Dec = codec.NewH264Decoder(codec.H264DecoderConfig{Width: width, Height: height})
 		if err := v.h264Dec.Start(); err != nil {
 			return fmt.Errorf("failed to start H.264 decoder: %w", err)
 		}
 		defer v.h264Dec.Close()
+		v.decoder = v.h264Dec
 		log.Printf("Viewer: H.264 decoder started")
-	} else {
+	default:
 		v.decoder = codec.NewJPEGCodec(85)
 		log.Printf("Viewer: JPEG decoder initialized")
 	}
@@ -380,8 +402,12 @@ func (v *Viewer) Run(ctx context.Context) error {
 
 		// Decode and display frames from buffer
 		frame, consumed := v.decoder.Decode(frameBuffer)
-		if consumed == 0 {
-			// Not enough data, wait for more (blocking)
+
+		// Block waiting for more data only when the decoder has produced
+		// nothing AND consumed nothing. A non-nil frame with consumed==0
+		// is the TS decoder draining a queued frame produced from an
+		// earlier call — let it flow through.
+		if frame == nil && consumed == 0 {
 			log.Printf("Viewer: waiting for data (buffer: %d bytes, frames: %d)", len(frameBuffer), videoFrameCount)
 			select {
 			case <-ctx.Done():
