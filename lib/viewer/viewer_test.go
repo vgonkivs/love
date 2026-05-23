@@ -260,6 +260,60 @@ func TestNewViewer_EmptyNamespaceHex(t *testing.T) {
 	}
 }
 
+// TestPlayAudio_BoundedBuffer verifies that playAudio drops the OLDEST
+// samples when audioBuffer exceeds audioMaxBytes — the quick-patch
+// behavior that prevents audio from drifting arbitrarily far ahead of
+// the (paced) video stream.
+func TestPlayAudio_BoundedBuffer(t *testing.T) {
+	v := &Viewer{audioMaxBytes: 100}
+
+	// Three writes of 60 bytes each: total 180, cap 100.
+	first := make([]byte, 60)
+	for i := range first {
+		first[i] = 0xAA
+	}
+	second := make([]byte, 60)
+	for i := range second {
+		second[i] = 0xBB
+	}
+	third := make([]byte, 60)
+	for i := range third {
+		third[i] = 0xCC
+	}
+
+	v.playAudio(first)
+	v.playAudio(second)
+	v.playAudio(third)
+
+	if got := len(v.audioBuffer); got != 100 {
+		t.Fatalf("buffer size: got %d, want 100", got)
+	}
+	// Newest 100 bytes must be the tail of (first+second+third) = last 60
+	// of third (all 0xCC) preceded by last 40 of second (all 0xBB).
+	for i := 0; i < 40; i++ {
+		if v.audioBuffer[i] != 0xBB {
+			t.Fatalf("audioBuffer[%d]: got %x, want 0xBB (oldest 0xAA bytes should have been dropped)", i, v.audioBuffer[i])
+		}
+	}
+	for i := 40; i < 100; i++ {
+		if v.audioBuffer[i] != 0xCC {
+			t.Fatalf("audioBuffer[%d]: got %x, want 0xCC", i, v.audioBuffer[i])
+		}
+	}
+}
+
+// TestPlayAudio_UnboundedWhenMaxZero verifies the cap is opt-in:
+// audioMaxBytes == 0 means no enforcement (preserves the legacy path
+// for tests / unit consumers that don't go through startAudioPlayer).
+func TestPlayAudio_UnboundedWhenMaxZero(t *testing.T) {
+	v := &Viewer{audioMaxBytes: 0}
+	v.playAudio(make([]byte, 1000))
+	v.playAudio(make([]byte, 1000))
+	if got := len(v.audioBuffer); got != 2000 {
+		t.Fatalf("with audioMaxBytes=0 buffer should accumulate; got %d", got)
+	}
+}
+
 func TestViewer_ConfigPreserved(t *testing.T) {
 	cfg := &Config{
 		NodeURL:    "http://test:1234",
