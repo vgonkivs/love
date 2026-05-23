@@ -50,7 +50,10 @@ func (c *Capturer) nextSequence() uint32 {
 	return seq
 }
 
-// addToBuffer adds encoded data to buffer and emits chunks when ready
+// addToBuffer adds encoded data to buffer and emits chunks when ready.
+// Blocks until each emitted chunk is sent or ctx is cancelled — providing
+// real backpressure to the producer rather than silently dropping data
+// (which would tear mid-GOP and break the downstream H.264 decoder).
 func (c *Capturer) addToBuffer(ctx context.Context, data []byte) {
 	c.bufferMu.Lock()
 	defer c.bufferMu.Unlock()
@@ -64,29 +67,27 @@ func (c *Capturer) addToBuffer(ctx context.Context, data []byte) {
 
 		select {
 		case c.output <- chunk:
+			c.buffer = c.buffer[codec.ChunkSize:]
 		case <-ctx.Done():
 			return
-		default:
-			// Channel full, drop chunk to prevent preview freeze
-			log.Println("Capturer: output channel full, dropping chunk")
 		}
-
-		c.buffer = c.buffer[codec.ChunkSize:]
 	}
 }
 
-// flushBuffer sends any remaining data in the buffer
+// flushBuffer sends any remaining data in the buffer.
+// Blocks until sent or ctx is cancelled; on cancellation the residual
+// bytes stay in c.buffer so a later flush (with a grace ctx) can retry.
 func (c *Capturer) flushBuffer(ctx context.Context) {
 	c.bufferMu.Lock()
 	defer c.bufferMu.Unlock()
 
-	if len(c.buffer) > 0 {
-		select {
-		case c.output <- c.buffer:
-		case <-ctx.Done():
-		default:
-		}
+	if len(c.buffer) == 0 {
+		return
+	}
+	select {
+	case c.output <- c.buffer:
 		c.buffer = nil
+	case <-ctx.Done():
 	}
 }
 
@@ -133,7 +134,10 @@ func (c *Capturer) startAudioCapture(ctx context.Context) error {
 				continue
 			}
 
-			go c.addToBuffer(ctx, encoded)
+			// Synchronous: serialize audio+video appends, and prevent
+			// goroutines from outliving Run (which would panic on the
+			// later close(blobChannel) in main.go).
+			c.addToBuffer(ctx, encoded)
 		}
 	}
 
@@ -265,8 +269,7 @@ func (c *Capturer) Run(ctx context.Context, output chan<- []byte) error {
 	for {
 		select {
 		case <-ctx.Done():
-			c.flushBuffer(ctx)
-			c.sendStreamEnd(ctx)
+			c.shutdown(ctx)
 			log.Println("Capturer: stopping")
 			return nil
 
@@ -285,8 +288,7 @@ func (c *Capturer) Run(ctx context.Context, output chan<- []byte) error {
 				previewWindow.IMShow(frame)
 				if previewWindow.WaitKey(1) == 27 { // ESC key
 					log.Println("Capturer: preview window closed by user")
-					c.flushBuffer(ctx)
-					c.sendStreamEnd(ctx)
+					c.shutdown(ctx)
 					return nil
 				}
 			}
@@ -303,7 +305,7 @@ func (c *Capturer) Run(ctx context.Context, output chan<- []byte) error {
 
 			// H.264 encoder may return nil when frame is still being processed
 			if encoded != nil {
-				go c.addToBuffer(ctx, encoded)
+				c.addToBuffer(ctx, encoded)
 			}
 		}
 	}
@@ -314,17 +316,43 @@ func (c *Capturer) GetEntrypoint() []byte {
 	return c.encoder.CreateEntrypoint(c.cfg.SampleRate, c.cfg.Channels, c.cfg.FPS)
 }
 
-// sendStreamEnd sends the stream end notification blob
+// shutdownGrace caps how long flushBuffer + sendStreamEnd may block once
+// the parent ctx is already cancelled. Without it, those operations would
+// instantly return on ctx.Done and the streamer would never see the tail.
+const shutdownGrace = 2 * time.Second
+
+// shutdown stops the audio device first (so audio callbacks can't race
+// the buffer or sequence counter), then flushes residual data and sends
+// the stream-end marker. If the parent ctx is already cancelled, a fresh
+// grace context is used so the tail still has a chance to be transmitted.
+// Safe to call multiple times; stopAudioCapture is idempotent.
+func (c *Capturer) shutdown(parent context.Context) {
+	c.stopAudioCapture()
+
+	flushCtx := parent
+	if parent.Err() != nil {
+		var cancel context.CancelFunc
+		flushCtx, cancel = context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+	}
+	c.flushBuffer(flushCtx)
+	c.sendStreamEnd(flushCtx)
+}
+
+// sendStreamEnd sends the stream end notification blob.
+// Must be called after audio capture has stopped — otherwise c.sequence
+// can be racy with the audio callback's nextSequence().
 func (c *Capturer) sendStreamEnd(ctx context.Context) {
 	totalDuration := time.Since(c.startTime)
+	c.sequenceMu.Lock()
 	totalFrames := c.sequence // sequence is the total frame count
+	c.sequenceMu.Unlock()
 	streamEnd := c.encoder.CreateStreamEnd(totalDuration, totalFrames)
 
 	select {
 	case c.output <- streamEnd:
 		log.Printf("Capturer: sent stream end blob (duration: %v, frames: %d)", totalDuration, totalFrames)
 	case <-ctx.Done():
-	default:
 	}
 }
 
