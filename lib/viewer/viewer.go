@@ -54,6 +54,13 @@ type Viewer struct {
 	audioRunning  bool
 	audioMu       sync.Mutex
 	audioInitErr  error
+	audioChannels int
+
+	// Audio-master clock. Pacing reads currentMs() to decide whether
+	// each video frame is early, on-time, or late. Falls back to
+	// fps-based pacing when the clock is not yet anchored (e.g.
+	// before the first audio chunk or when audio init failed).
+	clock *avClock
 }
 
 // maxAudioBufferSeconds caps how much audio may pile up in the playback
@@ -87,6 +94,7 @@ func NewViewer(cfg *Config, namespaceHex string, startHeight uint64) (*Viewer, e
 		cfg:       cfg,
 		namespace: namespace,
 		height:    startHeight,
+		clock:     newAVClock(0),
 	}, nil
 }
 
@@ -128,26 +136,40 @@ func (v *Viewer) startAudioPlayer(sampleRate, channels int) error {
 	deviceConfig.PeriodSizeInFrames = 1024
 	deviceConfig.Alsa.NoMMap = 1
 
-	// Cap audioBuffer at maxAudioBufferSeconds worth of S16 samples.
+	v.audioChannels = channels
+	v.clock.setRate(sampleRate)
+	bytesPerSample := channels * 2 // S16 = 2 bytes per channel sample
+
+	// Cap audioBuffer at maxAudioBufferSeconds worth of S16 samples
+	// so a burst of historical chunks cannot make audio race ahead.
 	v.audioBufMu.Lock()
-	v.audioMaxBytes = int(float64(sampleRate*channels*2) * maxAudioBufferSeconds)
+	v.audioMaxBytes = sampleRate * bytesPerSample * int(maxAudioBufferSeconds*1000) / 1000
 	v.audioBufMu.Unlock()
 
 	onSendFrames := func(outputSamples, inputSamples []byte, frameCount uint32) {
 		v.audioBufMu.Lock()
-		defer v.audioBufMu.Unlock()
+		bytesNeeded := int(frameCount) * bytesPerSample
+		copied := bytesNeeded
+		if len(v.audioBuffer) < bytesNeeded {
+			copied = len(v.audioBuffer)
+		}
 
-		bytesNeeded := int(frameCount) * channels * 2
+		if copied > 0 {
+			copy(outputSamples, v.audioBuffer[:copied])
+			v.audioBuffer = v.audioBuffer[copied:]
+		}
+		// Silence-fill the remainder so the device never plays back
+		// stale memory during underrun.
+		for i := copied; i < bytesNeeded; i++ {
+			outputSamples[i] = 0
+		}
+		v.audioBufMu.Unlock()
 
-		if len(v.audioBuffer) >= bytesNeeded {
-			copy(outputSamples, v.audioBuffer[:bytesNeeded])
-			v.audioBuffer = v.audioBuffer[bytesNeeded:]
-		} else {
-			copy(outputSamples, v.audioBuffer)
-			for i := len(v.audioBuffer); i < bytesNeeded; i++ {
-				outputSamples[i] = 0
-			}
-			v.audioBuffer = v.audioBuffer[:0]
+		// Advance the audio clock by the count actually played, not
+		// by frameCount — silence-fill must not move media-time
+		// forward or video pacing will race ahead during underrun.
+		if copied > 0 {
+			v.clock.addSamples(uint64(copied / bytesPerSample))
 		}
 	}
 
@@ -199,21 +221,26 @@ func (v *Viewer) stopAudioPlayer() {
 	log.Println("Viewer: audio player stopped")
 }
 
-// playAudio adds audio data to the playback buffer, capped at
-// audioMaxBytes. When the cap is exceeded — typically because the
-// blob fetcher delivered a burst of historical chunks faster than
-// the video pacer can advance — we drop the OLDEST samples instead of
-// the newest. Keeping the newest preserves the user's perceived
-// "now" in audio at the cost of one audible jump, rather than letting
-// audio race seconds ahead of video for the rest of the session.
-func (v *Viewer) playAudio(data []byte) {
+// playAudio queues PCM samples for playback. The first chunk anchors
+// the audio-master clock at ptsMs so later currentMs() reads land on
+// the same scale as video frame PTS. When the buffer exceeds
+// audioMaxBytes (a burst of historical chunks arriving faster than the
+// pacer can drain), the OLDEST samples are dropped — keeping the
+// user's perceived "now" at the cost of one audible jump instead of
+// letting audio race seconds ahead of video for the rest of the session.
+func (v *Viewer) playAudio(data []byte, ptsMs uint64) {
+	// Clock may be nil in unit tests that construct a Viewer literal
+	// without going through NewViewer.
+	if v.clock != nil {
+		v.clock.anchor(ptsMs)
+	}
 	v.audioBufMu.Lock()
-	defer v.audioBufMu.Unlock()
 	v.audioBuffer = append(v.audioBuffer, data...)
 	if v.audioMaxBytes > 0 && len(v.audioBuffer) > v.audioMaxBytes {
 		overflow := len(v.audioBuffer) - v.audioMaxBytes
 		v.audioBuffer = v.audioBuffer[overflow:]
 	}
+	v.audioBufMu.Unlock()
 }
 
 // Run starts the viewer, fetching blobs, decoding and displaying frames with audio
@@ -321,6 +348,7 @@ func (v *Viewer) Run(ctx context.Context) error {
 	defer v.stopAudioPlayer()
 
 	videoFrameCount := 0
+	videoFramesDropped := 0
 	audioChunkCount := 0
 
 	// Pacing. We can't trust per-wrapper timestamps for frame-accurate
@@ -376,8 +404,8 @@ func (v *Viewer) Run(ctx context.Context) error {
 		// Check for cancellation
 		select {
 		case <-ctx.Done():
-			log.Printf("Viewer: stopping, displayed %d video frames, played %d audio chunks",
-				videoFrameCount, audioChunkCount)
+			log.Printf("Viewer: stopping, displayed %d video frames (dropped %d), played %d audio chunks",
+				videoFrameCount, videoFramesDropped, audioChunkCount)
 			return nil
 		default:
 		}
@@ -450,7 +478,32 @@ func (v *Viewer) Run(ctx context.Context) error {
 		switch frame.Type {
 		case codec.FrameTypeVideo:
 			if frame.VideoFrame != nil {
-				esc := displayFrame(frame.VideoFrame)
+				// Pace against the audio clock when it has anchored;
+				// otherwise fall back to the fps-based displayFrame
+				// closure so audio-failed playback still works.
+				var esc bool
+				framePTSms := frame.Timestamp / uint64(time.Millisecond)
+				if mediaNowMs, ok := v.clock.currentMs(); ok {
+					dec := decideVideoPace(framePTSms, mediaNowMs, videoMaxAhead, videoMaxBehind)
+					if dec.drop {
+						frame.VideoFrame.Close()
+						videoFramesDropped++
+						frameBuffer = frameBuffer[consumed:]
+						continue
+					}
+					if dec.sleep > 0 {
+						select {
+						case <-ctx.Done():
+							frame.VideoFrame.Close()
+							return nil
+						case <-time.After(dec.sleep):
+						}
+					}
+					window.IMShow(*frame.VideoFrame)
+					esc = window.WaitKey(1) == 27
+				} else {
+					esc = displayFrame(frame.VideoFrame)
+				}
 				frame.VideoFrame.Close()
 				videoFrameCount++
 				if esc {
@@ -460,7 +513,7 @@ func (v *Viewer) Run(ctx context.Context) error {
 
 		case codec.FrameTypeAudio:
 			if v.audioInitErr == nil {
-				v.playAudio(frame.AudioData)
+				v.playAudio(frame.AudioData, frame.Timestamp/uint64(time.Millisecond))
 				audioChunkCount++
 			}
 		}

@@ -281,9 +281,9 @@ func TestPlayAudio_BoundedBuffer(t *testing.T) {
 		third[i] = 0xCC
 	}
 
-	v.playAudio(first)
-	v.playAudio(second)
-	v.playAudio(third)
+	v.playAudio(first, 0)
+	v.playAudio(second, 0)
+	v.playAudio(third, 0)
 
 	if got := len(v.audioBuffer); got != 100 {
 		t.Fatalf("buffer size: got %d, want 100", got)
@@ -307,8 +307,8 @@ func TestPlayAudio_BoundedBuffer(t *testing.T) {
 // for tests / unit consumers that don't go through startAudioPlayer).
 func TestPlayAudio_UnboundedWhenMaxZero(t *testing.T) {
 	v := &Viewer{audioMaxBytes: 0}
-	v.playAudio(make([]byte, 1000))
-	v.playAudio(make([]byte, 1000))
+	v.playAudio(make([]byte, 1000), 0)
+	v.playAudio(make([]byte, 1000), 0)
 	if got := len(v.audioBuffer); got != 2000 {
 		t.Fatalf("with audioMaxBytes=0 buffer should accumulate; got %d", got)
 	}
