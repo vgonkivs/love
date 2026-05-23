@@ -1,7 +1,9 @@
 package capture
 
 import (
+	"bytes"
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -78,6 +80,155 @@ func TestCapturer_Run_InvalidDevice(t *testing.T) {
 	if err != nil {
 		// Expected - invalid device should cause an error
 		t.Logf("Got expected error for invalid device: %v", err)
+	}
+}
+
+// newTestCapturer builds a Capturer with no real device, suitable for
+// exercising addToBuffer / flushBuffer in isolation.
+func newTestCapturer(t *testing.T, out chan<- []byte) *Capturer {
+	t.Helper()
+	c := NewCapturer(&Config{}, codec.NewJPEGCodec(85))
+	c.output = out
+	return c
+}
+
+// TestAddToBuffer_NoSilentDrop verifies that addToBuffer no longer drops a
+// chunk when the output channel is temporarily full — it must block until
+// the consumer drains, then deliver every byte exactly once.
+func TestAddToBuffer_NoSilentDrop(t *testing.T) {
+	out := make(chan []byte, 1)
+	c := newTestCapturer(t, out)
+
+	// Pre-fill the channel so the first send inside addToBuffer must block.
+	out <- []byte("preexisting")
+
+	// Two full chunks of distinct bytes.
+	data := bytes.Repeat([]byte{0xAB}, 2*codec.ChunkSize)
+
+	done := make(chan struct{})
+	go func() {
+		c.addToBuffer(context.Background(), data)
+		close(done)
+	}()
+
+	// addToBuffer should be blocked on the second send because out is full.
+	select {
+	case <-done:
+		t.Fatal("addToBuffer returned while output channel was full — old silent-drop behavior")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Drain everything and verify byte total.
+	totalRcvd := 0
+	for i := 0; i < 3; i++ { // 1 preexisting + 2 chunks
+		select {
+		case chunk := <-out:
+			totalRcvd += len(chunk)
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for chunk %d", i)
+		}
+	}
+
+	<-done
+	expected := len("preexisting") + 2*codec.ChunkSize
+	if totalRcvd != expected {
+		t.Fatalf("byte loss: got %d, want %d", totalRcvd, expected)
+	}
+}
+
+// TestAddToBuffer_CtxCancel verifies that on ctx cancellation the residual
+// data stays in c.buffer (so a later shutdownGrace flush can recover it),
+// instead of being silently consumed.
+func TestAddToBuffer_CtxCancel(t *testing.T) {
+	out := make(chan []byte) // unbuffered: any send will block
+	c := newTestCapturer(t, out)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	data := bytes.Repeat([]byte{0x42}, 3*codec.ChunkSize)
+
+	done := make(chan struct{})
+	go func() {
+		c.addToBuffer(ctx, data)
+		close(done)
+	}()
+
+	// Let it accumulate + block on first send.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("addToBuffer did not return after ctx cancel")
+	}
+
+	// All 3 chunks were appended; none were sent because nobody read out.
+	// All should remain in c.buffer for a later flush to recover.
+	c.bufferMu.Lock()
+	got := len(c.buffer)
+	c.bufferMu.Unlock()
+	if got != 3*codec.ChunkSize {
+		t.Fatalf("residual buffer: got %d bytes, want %d (data must survive ctx cancel)", got, 3*codec.ChunkSize)
+	}
+}
+
+// TestAddToBuffer_ConcurrentProducers verifies that addToBuffer is safe to
+// call concurrently from multiple goroutines (mimicking the
+// audio-callback + video-ticker contention) and that no bytes are lost.
+func TestAddToBuffer_ConcurrentProducers(t *testing.T) {
+	const producers = 8
+	const perProducer = 4
+	const chunkBytes = codec.ChunkSize
+
+	out := make(chan []byte, producers*perProducer)
+	c := newTestCapturer(t, out)
+
+	var wg sync.WaitGroup
+	for p := 0; p < producers; p++ {
+		wg.Add(1)
+		go func(id byte) {
+			defer wg.Done()
+			data := bytes.Repeat([]byte{id}, perProducer*chunkBytes)
+			c.addToBuffer(context.Background(), data)
+		}(byte(p))
+	}
+	wg.Wait()
+
+	close(out)
+	totalRcvd := 0
+	for chunk := range out {
+		totalRcvd += len(chunk)
+	}
+	expected := producers * perProducer * chunkBytes
+	if totalRcvd != expected {
+		t.Fatalf("byte loss under concurrency: got %d, want %d", totalRcvd, expected)
+	}
+}
+
+// TestFlushBuffer_AtomicOnCancel verifies that flushBuffer leaves the
+// buffer intact on ctx cancellation, so a follow-up flush (with the
+// shutdownGrace ctx) can deliver the data.
+func TestFlushBuffer_AtomicOnCancel(t *testing.T) {
+	out := make(chan []byte) // unbuffered: send blocks until reader
+	c := newTestCapturer(t, out)
+	c.buffer = []byte("tail-bytes")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		c.flushBuffer(ctx)
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	<-done
+
+	c.bufferMu.Lock()
+	got := string(c.buffer)
+	c.bufferMu.Unlock()
+	if got != "tail-bytes" {
+		t.Fatalf("buffer must survive ctx cancel for grace-period retry; got %q", got)
 	}
 }
 
