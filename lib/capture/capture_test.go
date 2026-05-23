@@ -7,8 +7,21 @@ import (
 	"testing"
 	"time"
 
+	"gocv.io/x/gocv"
+
 	"github.com/vgonkivs/love/lib/codec"
 )
+
+// stubEncoder is a no-op codec.Encoder used by tests that exercise the
+// Capturer's buffer/lifecycle paths and never actually encode anything.
+type stubEncoder struct{}
+
+func (stubEncoder) EncodeVideo(gocv.Mat, time.Duration, uint32) ([]byte, error) {
+	return nil, nil
+}
+func (stubEncoder) EncodeAudio([]byte, time.Duration, uint32) ([]byte, error) { return nil, nil }
+func (stubEncoder) CreateEntrypoint(int, int, int) []byte                     { return nil }
+func (stubEncoder) CreateStreamEnd(time.Duration, uint32) []byte              { return nil }
 
 func TestNewCapturer(t *testing.T) {
 	cfg := &Config{
@@ -23,8 +36,7 @@ func TestNewCapturer(t *testing.T) {
 		AudioBuffer:       1024,
 	}
 
-	encoder := codec.NewJPEGCodec(85)
-	capturer := NewCapturer(cfg, encoder)
+	capturer := NewCapturer(cfg, stubEncoder{})
 
 	if capturer == nil {
 		t.Fatal("expected non-nil capturer")
@@ -61,8 +73,7 @@ func TestCapturer_Run_InvalidDevice(t *testing.T) {
 		AudioBuffer:   1024,
 	}
 
-	encoder := codec.NewJPEGCodec(85)
-	capturer := NewCapturer(cfg, encoder)
+	capturer := NewCapturer(cfg, stubEncoder{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -87,7 +98,7 @@ func TestCapturer_Run_InvalidDevice(t *testing.T) {
 // exercising addToBuffer / flushBuffer in isolation.
 func newTestCapturer(t *testing.T, out chan<- []byte) *Capturer {
 	t.Helper()
-	c := NewCapturer(&Config{}, codec.NewJPEGCodec(85))
+	c := NewCapturer(&Config{}, stubEncoder{})
 	c.output = out
 	return c
 }

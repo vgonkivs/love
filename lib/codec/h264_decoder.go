@@ -268,91 +268,6 @@ func (d *H264Decoder) updateSpsPps() {
 	}
 }
 
-// Decode parses H.264 frame from multiplexed data with our header format
-// Returns the decoded frame info and bytes consumed
-// Note: This only extracts the frame data; actual H.264 decoding requires
-// feeding the data to DecodeH264Frame()
-func (d *H264Decoder) Decode(data []byte) (*DecodedFrame, int) {
-	if len(data) < 8 {
-		return nil, 0
-	}
-
-	marker := data[:4]
-	isH264 := bytes.Equal(marker, H264FrameMarker)
-	isAudio := bytes.Equal(marker, AudioFrameMarker)
-
-	if !isH264 && !isAudio {
-		return nil, 1 // Skip unknown marker
-	}
-
-	frameSize := int(binary.LittleEndian.Uint32(data[4:8]))
-
-	var headerSize int
-	var timestamp uint64
-	var sequence uint32
-
-	if len(data) >= FrameHeaderSize {
-		if FrameHeaderSize+frameSize <= len(data) {
-			headerSize = FrameHeaderSize
-			timestamp = binary.LittleEndian.Uint64(data[8:16])
-			sequence = binary.LittleEndian.Uint32(data[16:20])
-		} else if 8+frameSize <= len(data) {
-			headerSize = 8
-		} else {
-			return nil, 0
-		}
-	} else if 8+frameSize <= len(data) {
-		headerSize = 8
-	} else {
-		return nil, 0
-	}
-
-	totalSize := headerSize + frameSize
-	if len(data) < totalSize {
-		return nil, 0
-	}
-
-	frameData := data[headerSize:totalSize]
-
-	if isH264 {
-		// Feed to decoder and try to get a frame
-		frame, err := d.DecodeH264Frame(frameData)
-		if err != nil {
-			return nil, totalSize
-		}
-
-		if frame != nil {
-			return &DecodedFrame{
-				Type:       FrameTypeVideo,
-				VideoFrame: frame,
-				Timestamp:  timestamp,
-				Sequence:   sequence,
-			}, totalSize
-		}
-
-		// Frame fed to decoder but no output yet (normal for H.264)
-		// Return a marker indicating data was consumed but no frame ready
-		return &DecodedFrame{
-			Type:      FrameTypeNone,
-			Timestamp: timestamp,
-			Sequence:  sequence,
-		}, totalSize
-	}
-
-	if isAudio {
-		audioCopy := make([]byte, len(frameData))
-		copy(audioCopy, frameData)
-		return &DecodedFrame{
-			Type:      FrameTypeAudio,
-			AudioData: audioCopy,
-			Timestamp: timestamp,
-			Sequence:  sequence,
-		}, totalSize
-	}
-
-	return nil, 1
-}
-
 // Close stops the decoder and releases resources
 func (d *H264Decoder) Close() error {
 	d.closeMu.Lock()
@@ -398,17 +313,11 @@ func (d *H264Decoder) DrainFrames() []*gocv.Mat {
 	}
 }
 
-// ParseEntrypoint implements the Decoder interface
-// Uses the extended H.264 entrypoint format
-func (d *H264Decoder) ParseEntrypoint(data []byte) (sampleRate int, channels int, fps int, valid bool) {
-	sr, ch, f, _, _, _, v := ParseH264Entrypoint(data)
-	return sr, ch, f, v
-}
-
-// ParseH264Entrypoint extracts metadata from an entrypoint blob in either
-// the legacy 10-byte JPEG format or the extended 15-byte format used by
-// H.264 and TS streams. The returned codecID is one of the CodecID*
-// constants — legacy blobs without a codec byte report CodecIDJPEG.
+// ParseH264Entrypoint extracts metadata from an entrypoint blob in the
+// extended 15-byte format used by H.264 and TS streams. The returned
+// codecID is one of the CodecID* constants — entrypoints without a
+// codec byte (legacy 10-byte JPEG format) report CodecIDJPEG so the
+// viewer can detect and reject them.
 func ParseH264Entrypoint(data []byte) (sampleRate int, channels int, fps int, width int, height int, codecID byte, valid bool) {
 	if len(data) < 10 {
 		return 0, 0, 0, 0, 0, 0, false

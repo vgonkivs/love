@@ -1,41 +1,24 @@
 package codec
 
-import (
-	"encoding/binary"
-)
-
 const (
 	// ChunkSize is the target size for each blob (2MB = ~8 seconds of A/V at 2Mbps)
 	ChunkSize = 1974272 // 2MB
 )
 
 // Codec identifiers carried in the entrypoint blob so the viewer can pick
-// the matching decoder. Legacy JPEG entrypoints omit the byte entirely,
-// so the zero value must remain CodecIDJPEG.
+// the matching decoder. Legacy JPEG entrypoints omit the byte entirely
+// so the zero value must remain CodecIDJPEG; the viewer rejects anything
+// that is not CodecIDTS as an unsupported wire format.
 const (
 	CodecIDJPEG byte = 0
 	CodecIDH264 byte = 1
 	CodecIDTS   byte = 2 // H.264 video + AAC audio in MPEG-TS
 )
 
-// Frame type markers for multiplexing audio and video
+// EntrypointMarker tags the small metadata blob that opens every stream
+// (codec ID, dimensions, sample rate, channels, fps). StreamEndMarker
+// tags the optional end-of-stream blob.
 var (
-	VideoFrameMarker = []byte{'V', 'I', 'D', 'F'} // Video frame marker
-	AudioFrameMarker = []byte{'A', 'U', 'D', 'F'} // Audio frame marker
+	EntrypointMarker = []byte{'E', 'N', 'T', 'R'}
+	StreamEndMarker  = []byte{'E', 'N', 'D', 'S'}
 )
-
-const (
-	// FrameHeaderSize is the size of the frame header in bytes
-	// 4 (marker) + 4 (size) + 8 (timestamp) + 4 (sequence) = 20 bytes
-	FrameHeaderSize = 20
-)
-
-// EncodeFrameHeaderWithTimestamp creates a frame header with timestamp and sequence
-func EncodeFrameHeaderWithTimestamp(frameType []byte, dataSize int, timestamp uint64, sequence uint32) []byte {
-	header := make([]byte, FrameHeaderSize)
-	copy(header[:4], frameType)
-	binary.LittleEndian.PutUint32(header[4:8], uint32(dataSize))
-	binary.LittleEndian.PutUint64(header[8:16], timestamp)
-	binary.LittleEndian.PutUint32(header[16:20], sequence)
-	return header
-}

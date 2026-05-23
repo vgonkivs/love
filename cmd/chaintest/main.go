@@ -359,25 +359,14 @@ func main() {
 			frameCount++
 			ptsMs := uint64(time.Since(startTime).Milliseconds())
 
-			// Encode video frame to H.264
-			// Get raw frame data and write to encoder
-			frameData := frame.ToBytes()
-			if _, err := h264Encoder.EncodeVideo(frame, time.Since(startTime), uint32(frameCount)); err != nil {
-				log.Printf("H.264 encode error: %v", err)
+			// Feed the raw frame to the H.264 encoder and mux every NAL
+			// it spits out with the input frame's PTS. No legacy wrapper
+			// to strip — DrainRawNALs returns raw Annex-B NAL units.
+			if err := h264Encoder.WriteFrame(frame); err != nil {
+				log.Printf("H.264 write error: %v", err)
 			}
-			_ = frameData // Used implicitly by EncodeVideo
-
-			// Read encoded H.264 NAL units and feed to TS muxer
-			for {
-				encoded, err := h264Encoder.ReadEncodedFrameTimeout(time.Since(startTime), uint32(frameCount), time.Millisecond)
-				if err != nil || encoded == nil {
-					break
-				}
-				// Strip our header (20 bytes) to get raw H.264 data
-				if len(encoded) > 20 {
-					h264Data := encoded[20:]
-					tsMuxer.WriteVideo(h264Data, ptsMs, ptsMs)
-				}
+			for _, nal := range h264Encoder.DrainRawNALs() {
+				tsMuxer.WriteVideo(nal, ptsMs, ptsMs)
 			}
 
 			// Read encoded AAC frames and feed to TS muxer
