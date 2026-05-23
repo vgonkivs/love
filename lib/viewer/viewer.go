@@ -16,6 +16,13 @@ import (
 	"github.com/vgonkivs/love/lib/codec"
 )
 
+// liveEntrypointSearchWindow caps how many blocks past the user-supplied
+// -height the live viewer will scan for the entrypoint. ~10 minutes of
+// Celestia headers — enough slack for users picking the wrong start
+// block, without indefinitely walking the chain if the publisher never
+// posted in this namespace.
+const liveEntrypointSearchWindow = 100
+
 // Viewer subscribes to Celestia blobs and plays video/audio in real-time
 type Viewer struct {
 	cfg       *Config
@@ -173,9 +180,13 @@ func (v *Viewer) Run(ctx context.Context) error {
 		return fmt.Errorf("not connected to Celestia node")
 	}
 
-	currentHeight := v.height
+	startHeight := v.height
+	currentHeight := startHeight
 
-	// First, try to read entrypoint blob to detect codec type
+	// First, try to read entrypoint blob to detect codec type.
+	// Both modes walk forward from startHeight; live mode is bounded by
+	// liveEntrypointSearchWindow so an off-by-a-few startHeight (very
+	// common: user picks the wrong block) doesn't make -live exit fatally.
 	log.Printf("Viewer: looking for entrypoint blob at height %d", currentHeight)
 	var sampleRate, channels, fps, width, height int
 	var isH264 bool
@@ -190,8 +201,8 @@ func (v *Viewer) Run(ctx context.Context) error {
 
 		blobs, err := v.client.Blob.GetAll(ctx, currentHeight, []share.Namespace{v.namespace})
 		if err != nil || len(blobs) == 0 {
-			if v.cfg.Live {
-				return fmt.Errorf("no entrypoint blob found at height %d", currentHeight)
+			if v.cfg.Live && currentHeight-startHeight >= liveEntrypointSearchWindow {
+				return fmt.Errorf("no entrypoint blob found in [%d, %d]", startHeight, currentHeight)
 			}
 			// No blobs at this height, move to next immediately
 			currentHeight++
@@ -209,8 +220,8 @@ func (v *Viewer) Run(ctx context.Context) error {
 				height = h
 				isH264 = h264
 				foundEntrypoint = true
-				log.Printf("Viewer: found entrypoint - sample rate: %d, channels: %d, fps: %d, codec: %s",
-					sampleRate, channels, fps, map[bool]string{true: "H.264", false: "JPEG"}[isH264])
+				log.Printf("Viewer: found entrypoint at height %d - sample rate: %d, channels: %d, fps: %d, codec: %s",
+					currentHeight, sampleRate, channels, fps, map[bool]string{true: "H.264", false: "JPEG"}[isH264])
 				if isH264 {
 					log.Printf("Viewer: video dimensions: %dx%d", width, height)
 				}
@@ -219,8 +230,8 @@ func (v *Viewer) Run(ctx context.Context) error {
 		}
 
 		if !foundEntrypoint {
-			if v.cfg.Live {
-				return fmt.Errorf("no entrypoint blob found at height %d", currentHeight)
+			if v.cfg.Live && currentHeight-startHeight >= liveEntrypointSearchWindow {
+				return fmt.Errorf("no entrypoint blob found in [%d, %d]", startHeight, currentHeight)
 			}
 			currentHeight++
 		}
@@ -273,7 +284,7 @@ func (v *Viewer) Run(ctx context.Context) error {
 	defer fetchCancel()
 
 	if v.cfg.Live {
-		go v.fetchBlobsLive(fetchCtx, blobChan)
+		go v.fetchBlobsLive(fetchCtx, currentHeight, blobChan)
 	} else {
 		go v.fetchBlobs(fetchCtx, currentHeight, blobChan)
 	}
@@ -393,8 +404,18 @@ func (v *Viewer) Run(ctx context.Context) error {
 	}
 }
 
-// fetchBlobsLive subscribes to new blobs and sends data to channel in real-time
-func (v *Viewer) fetchBlobsLive(ctx context.Context, out chan<- []byte) {
+// fetchBlobsLive subscribes to new blobs and forwards them to out. The
+// subscription starts emitting from the current chain head, NOT from
+// fromHeight — so any blobs in [fromHeight, firstSubHeight) would be
+// lost without intervention. Since the H.264 encoder emits SPS/PPS+IDR
+// only every GOPSize frames (~6s), losing the prior IDR means the
+// viewer would see a multi-second decode-stall on every live join.
+//
+// To bridge the gap: capture the first subscription response (so we
+// know firstSubHeight), back-fill historical blobs in
+// [fromHeight, firstSubHeight) via GetAll, then forward the buffered
+// first response, then keep streaming subsequent responses.
+func (v *Viewer) fetchBlobsLive(ctx context.Context, fromHeight uint64, out chan<- []byte) {
 	defer close(out)
 
 	sub, err := v.client.Blob.Subscribe(ctx, v.namespace)
@@ -404,7 +425,72 @@ func (v *Viewer) fetchBlobsLive(ctx context.Context, out chan<- []byte) {
 	}
 	log.Println("Fetcher: subscribed to live blobs")
 
+	// Wait for the first subscription response — this tells us where
+	// the live tail begins so we can backfill from the entrypoint up
+	// to (but not including) it.
+	var firstHeight uint64
+	var firstData [][]byte
+	select {
+	case <-ctx.Done():
+		return
+	case resp, ok := <-sub:
+		if !ok {
+			log.Println("Fetcher: subscription closed before first response")
+			return
+		}
+		firstHeight = resp.Height
+		for _, b := range resp.Blobs {
+			if _, _, _, _, _, _, valid := codec.ParseH264Entrypoint(b.Data()); valid {
+				continue
+			}
+			firstData = append(firstData, b.Data())
+		}
+	}
+
 	blobsSent := 0
+	emit := func(height uint64, data []byte) bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case out <- data:
+			blobsSent++
+			log.Printf("Fetcher: sent blob %d (%d bytes) from height %d", blobsSent, len(data), height)
+			return true
+		}
+	}
+
+	// Backfill the gap, if any.
+	if firstHeight > fromHeight {
+		log.Printf("Fetcher: backfilling heights [%d, %d) before live tail", fromHeight, firstHeight)
+		for h := fromHeight; h < firstHeight; h++ {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			blobs, err := v.client.Blob.GetAll(ctx, h, []share.Namespace{v.namespace})
+			if err != nil || len(blobs) == 0 {
+				continue
+			}
+			for _, b := range blobs {
+				if _, _, _, _, _, _, valid := codec.ParseH264Entrypoint(b.Data()); valid {
+					continue
+				}
+				if !emit(h, b.Data()) {
+					return
+				}
+			}
+		}
+	}
+
+	// Forward the first subscription response we already pulled.
+	for _, data := range firstData {
+		if !emit(firstHeight, data) {
+			return
+		}
+	}
+
+	// Stream subsequent responses.
 	for {
 		select {
 		case <-ctx.Done():
@@ -415,17 +501,11 @@ func (v *Viewer) fetchBlobsLive(ctx context.Context, out chan<- []byte) {
 				return
 			}
 			for _, b := range resp.Blobs {
-				// Skip entrypoint blobs
 				if _, _, _, _, _, _, valid := codec.ParseH264Entrypoint(b.Data()); valid {
 					continue
 				}
-
-				select {
-				case <-ctx.Done():
+				if !emit(resp.Height, b.Data()) {
 					return
-				case out <- b.Data():
-					blobsSent++
-					log.Printf("Fetcher: sent blob %d (%d bytes) from height %d", blobsSent, len(b.Data()), resp.Height)
 				}
 			}
 		}

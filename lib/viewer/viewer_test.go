@@ -242,7 +242,7 @@ func TestNewViewer_NamespacePreserved(t *testing.T) {
 	}
 
 	// Verify namespace is preserved
-	if hex.EncodeToString(viewer.namespace) != namespaceHex {
+	if hex.EncodeToString(viewer.namespace.Bytes()) != namespaceHex {
 		t.Error("namespace not preserved correctly")
 	}
 }

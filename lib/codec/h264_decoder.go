@@ -189,7 +189,12 @@ func (d *H264Decoder) DecodeH264Frame(h264Data []byte) (*gocv.Mat, error) {
 	}
 	d.closeMu.Unlock()
 
-	// Check NAL type and cache SPS/PPS
+	// Check NAL type and cache SPS/PPS.
+	// IDR gate: until the decoder has been primed with SPS + PPS + IDR,
+	// any other NAL (P/B-slice, AUD, SEI) would feed ffmpeg garbage and
+	// either produce corrupt frames or silently emit nothing. This is
+	// the common case when joining a live stream mid-GOP — drop until
+	// the next keyframe arrives instead.
 	nalType := getNALType(h264Data)
 
 	d.spsMu.Lock()
@@ -203,14 +208,27 @@ func (d *H264Decoder) DecodeH264Frame(h264Data []byte) (*gocv.Mat, error) {
 		copy(d.pps, h264Data)
 		d.updateSpsPps()
 	case nalTypeIDR:
-		// For IDR frames, prepend SPS/PPS if we have them and haven't sent them yet
-		if len(d.spsPps) > 0 && !d.hasSPS {
+		// IDR without cached SPS/PPS is undecodable; drop it and wait
+		// for the producer to re-emit a parameter set.
+		if len(d.spsPps) == 0 {
+			d.spsMu.Unlock()
+			return nil, nil
+		}
+		// First IDR after SPS/PPS — prepend the parameter sets once.
+		if !d.hasSPS {
 			_, err := d.stdin.Write(d.spsPps)
 			if err != nil {
 				d.spsMu.Unlock()
 				return nil, fmt.Errorf("failed to write SPS/PPS: %w", err)
 			}
 			d.hasSPS = true
+		}
+	default:
+		// Any other NAL before we've ever decoded an IDR cannot be used
+		// safely; drop silently.
+		if !d.hasSPS {
+			d.spsMu.Unlock()
+			return nil, nil
 		}
 	}
 	d.spsMu.Unlock()
