@@ -405,29 +405,29 @@ func (d *H264Decoder) ParseEntrypoint(data []byte) (sampleRate int, channels int
 	return sr, ch, f, v
 }
 
-// ParseH264Entrypoint extracts metadata from H.264 entrypoint blob
-// Extended format includes codec identifier and dimensions
-func ParseH264Entrypoint(data []byte) (sampleRate int, channels int, fps int, width int, height int, isH264 bool, valid bool) {
+// ParseH264Entrypoint extracts metadata from an entrypoint blob in either
+// the legacy 10-byte JPEG format or the extended 15-byte format used by
+// H.264 and TS streams. The returned codecID is one of the CodecID*
+// constants — legacy blobs without a codec byte report CodecIDJPEG.
+func ParseH264Entrypoint(data []byte) (sampleRate int, channels int, fps int, width int, height int, codecID byte, valid bool) {
 	if len(data) < 10 {
-		return 0, 0, 0, 0, 0, false, false
+		return 0, 0, 0, 0, 0, 0, false
 	}
 	if !bytes.Equal(data[:4], EntrypointMarker) {
-		return 0, 0, 0, 0, 0, false, false
+		return 0, 0, 0, 0, 0, 0, false
 	}
 	sampleRate = int(binary.LittleEndian.Uint32(data[4:8]))
 	channels = int(data[8])
 	fps = int(data[9])
 
-	// Check for codec identifier (extended format)
 	if len(data) >= 11 {
-		isH264 = data[10] == 1
+		codecID = data[10]
 	}
 
-	// Check for dimensions (H.264 extended format)
 	if len(data) >= 15 {
 		width = int(binary.LittleEndian.Uint16(data[11:13]))
 		height = int(binary.LittleEndian.Uint16(data[13:15]))
 	}
 
-	return sampleRate, channels, fps, width, height, isH264, true
+	return sampleRate, channels, fps, width, height, codecID, true
 }

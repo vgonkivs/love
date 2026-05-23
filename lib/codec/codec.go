@@ -9,6 +9,15 @@ const (
 	ChunkSize = 1974272 // 2MB
 )
 
+// Codec identifiers carried in the entrypoint blob so the viewer can pick
+// the matching decoder. Legacy JPEG entrypoints omit the byte entirely,
+// so the zero value must remain CodecIDJPEG.
+const (
+	CodecIDJPEG byte = 0
+	CodecIDH264 byte = 1
+	CodecIDTS   byte = 2 // H.264 video + AAC audio in MPEG-TS
+)
+
 // Frame type markers for multiplexing audio and video
 var (
 	VideoFrameMarker = []byte{'V', 'I', 'D', 'F'} // Video frame marker

@@ -119,15 +119,16 @@ func runStream(args []string) {
 		cancel()
 	}()
 
-	// Create codec (H.264 encoder)
-	encoderCfg := codec.H264EncoderConfig{
-		Width:   *width,
-		Height:  *height,
-		FPS:     *fps,
-		Bitrate: *bitrate,
-		GOPSize: *fps * 6, // Keyframe every 6 seconds
-	}
-	encoder := codec.NewH264Encoder(encoderCfg)
+	// MPEG-TS encoder: H.264 video + AAC audio muxed per-access-unit so
+	// every NAL and every audio frame carry their own PTS.
+	encoder := codec.NewTSEncoder(codec.TSEncoderConfig{
+		Width:      *width,
+		Height:     *height,
+		FPS:        *fps,
+		Bitrate:    *bitrate,
+		SampleRate: *sampleRate,
+		Channels:   1,
+	})
 
 	// Create capturer with encoder
 	captureCfg := &capture.Config{

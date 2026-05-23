@@ -224,7 +224,7 @@ func TestH264_Entrypoint(t *testing.T) {
 	}
 
 	// Parse it back
-	sampleRate, channels, fps, width, height, isH264, valid := ParseH264Entrypoint(entrypoint)
+	sampleRate, channels, fps, width, height, codecID, valid := ParseH264Entrypoint(entrypoint)
 	if !valid {
 		t.Fatal("expected valid entrypoint")
 	}
@@ -243,8 +243,8 @@ func TestH264_Entrypoint(t *testing.T) {
 	if height != 720 {
 		t.Errorf("expected height 720, got %d", height)
 	}
-	if !isH264 {
-		t.Error("expected isH264 to be true")
+	if codecID != CodecIDH264 {
+		t.Errorf("expected codec ID %d (H.264), got %d", CodecIDH264, codecID)
 	}
 }
 
