@@ -26,14 +26,28 @@ type Viewer struct {
 	height    uint64
 
 	// Audio player state
-	audioCtx     *malgo.AllocatedContext
-	audioDevice  *malgo.Device
-	audioBuffer  []byte
-	audioBufMu   sync.Mutex
-	audioRunning bool
-	audioMu      sync.Mutex
-	audioInitErr error
+	audioCtx      *malgo.AllocatedContext
+	audioDevice   *malgo.Device
+	audioBuffer   []byte
+	audioBufMu    sync.Mutex
+	audioMaxBytes int // 0 = unbounded; set by startAudioPlayer to maxAudioBufferSeconds worth
+	audioRunning  bool
+	audioMu       sync.Mutex
+	audioInitErr  error
 }
+
+// maxAudioBufferSeconds caps how much audio may pile up in the playback
+// buffer ahead of video. Without this cap, audio races arbitrarily far
+// ahead of the (paced) video stream — a quick patch around the deeper
+// "no shared A/V clock" problem (see R2 in the audit). 500ms is small
+// enough to be barely noticeable as drift and large enough to absorb
+// normal decode jitter.
+const maxAudioBufferSeconds = 0.5
+
+// defaultPlaybackFPS is used when the entrypoint advertises fps <= 0.
+// Pacing needs a non-zero period to avoid a div-by-zero and to bound
+// the display rate when the FrameTypeNone path drains decoded frames.
+const defaultPlaybackFPS = 30
 
 // NewViewer creates a new viewer
 // Decoder is created automatically based on entrypoint blob
@@ -93,6 +107,11 @@ func (v *Viewer) startAudioPlayer(sampleRate, channels int) error {
 	deviceConfig.SampleRate = uint32(sampleRate)
 	deviceConfig.PeriodSizeInFrames = 1024
 	deviceConfig.Alsa.NoMMap = 1
+
+	// Cap audioBuffer at maxAudioBufferSeconds worth of S16 samples.
+	v.audioBufMu.Lock()
+	v.audioMaxBytes = int(float64(sampleRate*channels*2) * maxAudioBufferSeconds)
+	v.audioBufMu.Unlock()
 
 	onSendFrames := func(outputSamples, inputSamples []byte, frameCount uint32) {
 		v.audioBufMu.Lock()
@@ -160,11 +179,21 @@ func (v *Viewer) stopAudioPlayer() {
 	log.Println("Viewer: audio player stopped")
 }
 
-// playAudio adds audio data to the playback buffer
+// playAudio adds audio data to the playback buffer, capped at
+// audioMaxBytes. When the cap is exceeded — typically because the
+// blob fetcher delivered a burst of historical chunks faster than
+// the video pacer can advance — we drop the OLDEST samples instead of
+// the newest. Keeping the newest preserves the user's perceived
+// "now" in audio at the cost of one audible jump, rather than letting
+// audio race seconds ahead of video for the rest of the session.
 func (v *Viewer) playAudio(data []byte) {
 	v.audioBufMu.Lock()
 	defer v.audioBufMu.Unlock()
 	v.audioBuffer = append(v.audioBuffer, data...)
+	if v.audioMaxBytes > 0 && len(v.audioBuffer) > v.audioMaxBytes {
+		overflow := len(v.audioBuffer) - v.audioMaxBytes
+		v.audioBuffer = v.audioBuffer[overflow:]
+	}
 }
 
 // Run starts the viewer, fetching blobs, decoding and displaying frames with audio
@@ -261,8 +290,37 @@ func (v *Viewer) Run(ctx context.Context) error {
 	videoFrameCount := 0
 	audioChunkCount := 0
 
-	// Unused variable to match expected FPS
-	_ = fps
+	// Pacing. We can't trust per-wrapper timestamps for frame-accurate
+	// pacing — the H.264 encoder bundles multiple NALs under one wrapper
+	// timestamp, so a single wrapper can correspond to a burst of
+	// decoded frames (see audit finding #9). Pace strictly by fps from
+	// the entrypoint instead. Applies uniformly to both code paths:
+	// FrameTypeVideo (decoder returned a frame inline) and FrameTypeNone
+	// followed by DrainFrames (decoder buffered frames internally).
+	if fps <= 0 {
+		log.Printf("Viewer: entrypoint advertised fps=%d, falling back to %d", fps, defaultPlaybackFPS)
+		fps = defaultPlaybackFPS
+	}
+	frameDuration := time.Second / time.Duration(fps)
+	var nextFrameAt time.Time // zero = display first frame immediately
+
+	displayFrame := func(m *gocv.Mat) (esc bool) {
+		if !nextFrameAt.IsZero() {
+			if wait := time.Until(nextFrameAt); wait > 0 {
+				time.Sleep(wait)
+			}
+		}
+		now := time.Now()
+		// If we fell more than one period behind (e.g. decode stall),
+		// resync rather than chasing wall clock with sub-period sleeps.
+		if nextFrameAt.IsZero() || nextFrameAt.Before(now.Add(-frameDuration)) {
+			nextFrameAt = now.Add(frameDuration)
+		} else {
+			nextFrameAt = nextFrameAt.Add(frameDuration)
+		}
+		window.IMShow(*m)
+		return window.WaitKey(1) == 27
+	}
 
 	log.Printf("Viewer: starting playback from height %d, namespace: %s",
 		currentHeight, hex.EncodeToString(v.namespace.Bytes()))
@@ -280,9 +338,6 @@ func (v *Viewer) Run(ctx context.Context) error {
 
 	// Playback loop
 	frameBuffer := make([]byte, 0)
-	var firstVideoTimestamp uint64
-	var playbackStartTime time.Time
-	videoTimingStarted := false
 
 	for {
 		// Check for cancellation
@@ -335,20 +390,20 @@ func (v *Viewer) Run(ctx context.Context) error {
 			continue
 		}
 
-		// Skip FrameTypeNone (H.264 frame still being processed)
+		// FrameTypeNone: input bytes consumed but no inline decoded frame.
+		// Drain any frames the decoder has buffered, and pace each one.
 		if frame.Type == codec.FrameTypeNone {
 			frameBuffer = frameBuffer[consumed:]
-			// Check for decoded frames from H.264 decoder
 			if v.h264Dec != nil {
 				for _, videoFrame := range v.h264Dec.DrainFrames() {
-					if videoFrame != nil {
-						window.IMShow(*videoFrame)
-						if window.WaitKey(1) == 27 {
-							videoFrame.Close()
-							return nil
-						}
-						videoFrame.Close()
-						videoFrameCount++
+					if videoFrame == nil {
+						continue
+					}
+					esc := displayFrame(videoFrame)
+					videoFrame.Close()
+					videoFrameCount++
+					if esc {
+						return nil
 					}
 				}
 			}
@@ -358,28 +413,12 @@ func (v *Viewer) Run(ctx context.Context) error {
 		switch frame.Type {
 		case codec.FrameTypeVideo:
 			if frame.VideoFrame != nil {
-				// Pace video based on timestamps
-				if !videoTimingStarted {
-					firstVideoTimestamp = frame.Timestamp
-					playbackStartTime = time.Now()
-					videoTimingStarted = true
-				} else {
-					// Calculate when this frame should be displayed
-					elapsed := frame.Timestamp - firstVideoTimestamp
-					targetTime := playbackStartTime.Add(time.Duration(elapsed))
-					waitTime := time.Until(targetTime)
-					if waitTime > 0 && waitTime < time.Second {
-						time.Sleep(waitTime)
-					}
-				}
-
-				window.IMShow(*frame.VideoFrame)
-				if window.WaitKey(1) == 27 {
-					frame.VideoFrame.Close()
-					return nil
-				}
+				esc := displayFrame(frame.VideoFrame)
 				frame.VideoFrame.Close()
 				videoFrameCount++
+				if esc {
+					return nil
+				}
 			}
 
 		case codec.FrameTypeAudio:
