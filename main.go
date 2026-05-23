@@ -66,6 +66,7 @@ func printUsage() {
 	fmt.Println("  -pop-api-key string  POPSigner API key")
 	fmt.Println("  -pop-key-id string   POPSigner key name or ID")
 	fmt.Println("  -gas-price float   Gas price in utia (default 0 = use default min gas price)")
+	fmt.Println("  -timeout duration  Per-call gRPC timeout (default 30s)")
 	fmt.Println()
 	fmt.Println("View options:")
 	fmt.Println("  -namespace string  Stream namespace (hex)")
@@ -102,6 +103,7 @@ func runStream(args []string) {
 	popAPIKey := fs.String("pop-api-key", "", "POPSigner API key")
 	popKeyID := fs.String("pop-key-id", "", "POPSigner key name or ID")
 	gasPrice := fs.Float64("gas-price", 0, "Gas price in utia (0 = use default min gas price)")
+	timeout := fs.Duration("timeout", streamer.DefaultTimeout, "Per-call gRPC timeout (BroadcastTx, QueryAccount)")
 
 	fs.Parse(args)
 
@@ -149,6 +151,7 @@ func runStream(args []string) {
 		PopSignerKeyID:  *popKeyID,
 		ChainID:         *chainID,
 		GasPrice:        *gasPrice,
+		Timeout:         *timeout,
 	}
 	str, err := streamer.NewStreamer(streamerCfg)
 	if err != nil {
