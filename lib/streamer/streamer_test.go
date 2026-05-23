@@ -203,6 +203,81 @@ func TestNewStreamer_NamespaceLength(t *testing.T) {
 	}
 }
 
+func TestCallCtx_UsesConfiguredTimeout(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Timeout = 50 * time.Millisecond
+	s, err := NewStreamer(cfg)
+	if err != nil {
+		t.Fatalf("NewStreamer: %v", err)
+	}
+
+	parent := context.Background()
+	cctx, cancel := s.callCtx(parent)
+	defer cancel()
+
+	dl, ok := cctx.Deadline()
+	if !ok {
+		t.Fatal("callCtx should attach a deadline")
+	}
+	remaining := time.Until(dl)
+	if remaining <= 0 || remaining > cfg.Timeout {
+		t.Fatalf("deadline out of expected window: remaining=%v, timeout=%v", remaining, cfg.Timeout)
+	}
+
+	// Actually expires.
+	select {
+	case <-cctx.Done():
+	case <-time.After(cfg.Timeout * 4):
+		t.Fatal("callCtx did not expire within 4x the configured timeout")
+	}
+}
+
+func TestCallCtx_FallsBackToDefault(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Timeout = 0 // unset → DefaultTimeout
+	s, err := NewStreamer(cfg)
+	if err != nil {
+		t.Fatalf("NewStreamer: %v", err)
+	}
+
+	cctx, cancel := s.callCtx(context.Background())
+	defer cancel()
+
+	dl, ok := cctx.Deadline()
+	if !ok {
+		t.Fatal("callCtx should attach a deadline even when Timeout is zero")
+	}
+	remaining := time.Until(dl)
+	// Allow some slack but must be in the DefaultTimeout ballpark.
+	if remaining <= 0 || remaining > DefaultTimeout {
+		t.Fatalf("deadline not derived from DefaultTimeout: remaining=%v, default=%v", remaining, DefaultTimeout)
+	}
+	if DefaultTimeout-remaining > time.Second {
+		t.Fatalf("deadline too far from DefaultTimeout: remaining=%v, default=%v", remaining, DefaultTimeout)
+	}
+}
+
+func TestCallCtx_RespectsParentCancellation(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Timeout = time.Hour // long enough that parent cancel must dominate
+	s, err := NewStreamer(cfg)
+	if err != nil {
+		t.Fatalf("NewStreamer: %v", err)
+	}
+
+	parent, parentCancel := context.WithCancel(context.Background())
+	cctx, cancel := s.callCtx(parent)
+	defer cancel()
+
+	parentCancel()
+
+	select {
+	case <-cctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("callCtx should be cancelled when parent is cancelled")
+	}
+}
+
 func TestStreamer_MultipleClose(t *testing.T) {
 	cfg := newTestConfig()
 	streamer, err := NewStreamer(cfg)

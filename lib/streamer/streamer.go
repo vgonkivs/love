@@ -53,6 +53,23 @@ func NewStreamer(cfg *Config) (*Streamer, error) {
 	}, nil
 }
 
+// callCtx derives a per-call context bounded by cfg.Timeout (or
+// DefaultTimeout if unset). Used to prevent any single gRPC call from
+// hanging Run forever — which otherwise saturates the upstream
+// blobChannel and triggers data loss in the capturer.
+//
+// Note: signer.CreatePayForBlobs is NOT wrapped here because the
+// underlying popsigner Sign() doesn't accept a context; that path is
+// instead bounded by the popsigner SDK's own HTTP client timeout
+// (popsigner.DefaultTimeout, 30s).
+func (s *Streamer) callCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	timeout := s.cfg.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
 // Connect establishes connection to consensus node via gRPC and sets up POPSigner
 func (s *Streamer) Connect(ctx context.Context) error {
 	// Create POPSigner keyring
@@ -90,7 +107,9 @@ func (s *Streamer) Connect(ctx context.Context) error {
 	}
 
 	// Query account info from consensus node
-	accNum, seqNum, err := user.QueryAccount(ctx, conn, s.encCfg.InterfaceRegistry, addr)
+	qCtx, qCancel := s.callCtx(ctx)
+	accNum, seqNum, err := user.QueryAccount(qCtx, conn, s.encCfg.InterfaceRegistry, addr)
+	qCancel()
 	if err != nil {
 		return fmt.Errorf("failed to query account: %w", err)
 	}
@@ -183,11 +202,15 @@ func (s *Streamer) submitBlob(ctx context.Context, data []byte) error {
 		return fmt.Errorf("failed to create pay for blobs tx: %w", err)
 	}
 
-	// Broadcast the signed transaction
-	resp, err := s.txClient.BroadcastTx(ctx, &cosmostx.BroadcastTxRequest{
+	// Broadcast the signed transaction with a per-call timeout so a hung
+	// consensus node can't stall the Run loop indefinitely (which would
+	// saturate the blobChannel and cause the capturer to drop chunks).
+	bCtx, bCancel := s.callCtx(ctx)
+	resp, err := s.txClient.BroadcastTx(bCtx, &cosmostx.BroadcastTxRequest{
 		TxBytes: blobTxBytes,
 		Mode:    cosmostx.BroadcastMode_BROADCAST_MODE_SYNC,
 	})
+	bCancel()
 	if err != nil {
 		return fmt.Errorf("failed to broadcast tx: %w", err)
 	}
@@ -209,10 +232,12 @@ func (s *Streamer) submitBlob(ctx context.Context, data []byte) error {
 			return fmt.Errorf("failed to create pay for blobs tx (retry): %w", err)
 		}
 
-		resp, err = s.txClient.BroadcastTx(ctx, &cosmostx.BroadcastTxRequest{
+		rCtx, rCancel := s.callCtx(ctx)
+		resp, err = s.txClient.BroadcastTx(rCtx, &cosmostx.BroadcastTxRequest{
 			TxBytes: blobTxBytes,
 			Mode:    cosmostx.BroadcastMode_BROADCAST_MODE_SYNC,
 		})
+		rCancel()
 		if err != nil {
 			return fmt.Errorf("failed to broadcast tx (retry): %w", err)
 		}
@@ -241,7 +266,9 @@ func (s *Streamer) refreshSequence(ctx context.Context) error {
 		return err
 	}
 
-	_, seqNum, err := user.QueryAccount(ctx, s.conn, s.encCfg.InterfaceRegistry, addr)
+	qCtx, qCancel := s.callCtx(ctx)
+	_, seqNum, err := user.QueryAccount(qCtx, s.conn, s.encCfg.InterfaceRegistry, addr)
+	qCancel()
 	if err != nil {
 		return err
 	}
