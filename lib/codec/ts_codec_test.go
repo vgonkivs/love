@@ -37,8 +37,11 @@ func TestTSEncoder_EntrypointShape(t *testing.T) {
 		t.Error("ParseTSEntrypoint rejected a valid TS entrypoint")
 	}
 
-	h264enc := NewH264Encoder(DefaultH264EncoderConfig(640, 480, 30))
-	h264ep := h264enc.CreateEntrypoint(44100, 1, 30)
+	// Synthesize a non-TS (legacy raw-H.264) entrypoint and confirm
+	// ParseTSEntrypoint rejects it. The H264 encoder no longer exposes
+	// a CreateEntrypoint helper since we don't emit that format anymore.
+	h264ep := append([]byte{}, ep...)
+	h264ep[10] = CodecIDH264
 	if _, _, _, _, _, ok := ParseTSEntrypoint(h264ep); ok {
 		t.Error("ParseTSEntrypoint accepted a non-TS (H.264) entrypoint")
 	}

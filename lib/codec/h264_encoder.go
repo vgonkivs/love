@@ -2,20 +2,18 @@ package codec
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"os/exec"
 	"sync"
-	"time"
 
 	"gocv.io/x/gocv"
 )
 
-// H264FrameMarker identifies H.264 encoded video frames
-var H264FrameMarker = []byte{'H', '2', '6', '4'}
-
-// H264Encoder encodes video frames to H.264 using ffmpeg
+// H264Encoder encodes video frames to H.264 using ffmpeg. The output
+// channel emits raw Annex-B NAL units; callers are expected to package
+// them into a container (e.g. MPEG-TS via TSEncoder) and assign their
+// own timing.
 type H264Encoder struct {
 	width   int
 	height  int
@@ -28,15 +26,12 @@ type H264Encoder struct {
 	stdout io.ReadCloser
 	stderr bytes.Buffer
 
-	outputBuf    bytes.Buffer
-	outputMu     sync.Mutex
-	encodedChan  chan []byte
-	errorChan    chan error
-	done         chan struct{}
-	started      bool
-	frameCount   uint32
-	closed       bool
-	closeMu      sync.Mutex
+	encodedChan chan []byte
+	errorChan   chan error
+	done        chan struct{}
+	started     bool
+	closed      bool
+	closeMu     sync.Mutex
 }
 
 // H264EncoderConfig holds configuration for the H.264 encoder
@@ -225,58 +220,9 @@ func extractNALUnits(data []byte) [][]byte {
 	return units
 }
 
-// EncodeVideo encodes a video frame to H.264
-// Returns the encoded frame with header, or nil if frame is still being processed
-// Call ReadEncodedFrame() to get encoded output asynchronously
-func (e *H264Encoder) EncodeVideo(frame gocv.Mat, timestamp time.Duration, sequence uint32) ([]byte, error) {
-	e.closeMu.Lock()
-	if e.closed {
-		e.closeMu.Unlock()
-		return nil, fmt.Errorf("encoder is closed")
-	}
-	if !e.started {
-		e.closeMu.Unlock()
-		return nil, fmt.Errorf("encoder not started, call Start() first")
-	}
-	e.closeMu.Unlock()
-
-	// Get raw frame data (BGR24)
-	data := frame.ToBytes()
-	expectedSize := e.width * e.height * 3
-	if len(data) != expectedSize {
-		return nil, fmt.Errorf("frame size mismatch: got %d, expected %d", len(data), expectedSize)
-	}
-
-	// Write frame to ffmpeg stdin
-	_, err := e.stdin.Write(data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to write frame: %w", err)
-	}
-
-	e.frameCount++
-
-	// Drain all available encoded NAL units and combine them
-	var allNALs []byte
-	for {
-		select {
-		case encoded, ok := <-e.encodedChan:
-			if !ok {
-				return nil, fmt.Errorf("encoder channel closed")
-			}
-			allNALs = append(allNALs, encoded...)
-		default:
-			// No more NAL units available
-			if len(allNALs) > 0 {
-				return e.wrapFrame(allNALs, timestamp, sequence), nil
-			}
-			return nil, nil
-		}
-	}
-}
-
-// DrainRawNALs returns all currently buffered NAL units without the
-// custom frame wrapper. Intended for callers that mux the NALs into
-// a container (e.g. MPEG-TS) and apply their own timestamping.
+// DrainRawNALs returns all currently buffered NAL units without any
+// framing wrapper. Intended for callers that mux the NALs into a
+// container (e.g. MPEG-TS) and apply their own timestamping.
 func (e *H264Encoder) DrainRawNALs() [][]byte {
 	var nals [][]byte
 	for {
@@ -315,39 +261,7 @@ func (e *H264Encoder) WriteFrame(frame gocv.Mat) error {
 	if _, err := e.stdin.Write(data); err != nil {
 		return fmt.Errorf("failed to write frame: %w", err)
 	}
-	e.frameCount++
 	return nil
-}
-
-// ReadEncodedFrameTimeout reads with timeout
-func (e *H264Encoder) ReadEncodedFrameTimeout(timestamp time.Duration, sequence uint32, timeout time.Duration) ([]byte, error) {
-	select {
-	case encoded, ok := <-e.encodedChan:
-		if !ok {
-			return nil, io.EOF
-		}
-		return e.wrapFrame(encoded, timestamp, sequence), nil
-	case err := <-e.errorChan:
-		return nil, err
-	case <-e.done:
-		return nil, io.EOF
-	case <-time.After(timeout):
-		return nil, nil // No frame available yet
-	}
-}
-
-// wrapFrame wraps encoded H.264 data with our frame header
-func (e *H264Encoder) wrapFrame(encoded []byte, timestamp time.Duration, sequence uint32) []byte {
-	header := make([]byte, FrameHeaderSize)
-	copy(header[:4], H264FrameMarker)
-	binary.LittleEndian.PutUint32(header[4:8], uint32(len(encoded)))
-	binary.LittleEndian.PutUint64(header[8:16], uint64(timestamp.Nanoseconds()))
-	binary.LittleEndian.PutUint32(header[16:20], sequence)
-
-	result := make([]byte, len(header)+len(encoded))
-	copy(result, header)
-	copy(result[len(header):], encoded)
-	return result
 }
 
 // Close stops the encoder and releases resources
@@ -379,38 +293,3 @@ func (e *H264Encoder) GetStderr() string {
 	return e.stderr.String()
 }
 
-// EncodeAudio encodes audio samples with header (same as JPEG codec)
-func (e *H264Encoder) EncodeAudio(samples []byte, timestamp time.Duration, sequence uint32) ([]byte, error) {
-	header := EncodeFrameHeaderWithTimestamp(AudioFrameMarker, len(samples), uint64(timestamp.Nanoseconds()), sequence)
-
-	result := make([]byte, len(header)+len(samples))
-	copy(result, header)
-	copy(result[len(header):], samples)
-
-	return result, nil
-}
-
-// CreateEntrypoint creates the metadata blob for stream start
-// Format: ENTR (4 bytes) + sample_rate (4 bytes) + channels (1 byte) + fps (1 byte) + codec (1 byte) + width (2 bytes) + height (2 bytes)
-// Codec: 0 = JPEG, 1 = H.264
-func (e *H264Encoder) CreateEntrypoint(sampleRate int, channels int, fps int) []byte {
-	data := make([]byte, 15) // Extended format with codec and dimensions
-	copy(data[:4], EntrypointMarker)
-	binary.LittleEndian.PutUint32(data[4:8], uint32(sampleRate))
-	data[8] = byte(channels)
-	data[9] = byte(fps)
-	data[10] = CodecIDH264
-	binary.LittleEndian.PutUint16(data[11:13], uint16(e.width))
-	binary.LittleEndian.PutUint16(data[13:15], uint16(e.height))
-	return data
-}
-
-// CreateStreamEnd creates the stream end notification blob
-// Format: ENDS (4 bytes) + total_duration_ns (8 bytes) + total_frames (4 bytes)
-func (e *H264Encoder) CreateStreamEnd(totalDuration time.Duration, totalFrames uint32) []byte {
-	data := make([]byte, 16)
-	copy(data[:4], StreamEndMarker)
-	binary.LittleEndian.PutUint64(data[4:12], uint64(totalDuration.Nanoseconds()))
-	binary.LittleEndian.PutUint32(data[12:16], totalFrames)
-	return data
-}

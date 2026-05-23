@@ -24,14 +24,18 @@ import (
 const liveEntrypointSearchWindow = 100
 
 // codecName renders the entrypoint codec ID as a human-readable label.
+// Used in log lines and in the "unsupported codec" error so a viewer
+// pointed at a pre-R1 stream gets a useful diagnostic.
 func codecName(id byte) string {
 	switch id {
 	case codec.CodecIDTS:
 		return "MPEG-TS (H.264+AAC)"
 	case codec.CodecIDH264:
-		return "H.264"
+		return "raw H.264 (pre-R1)"
+	case codec.CodecIDJPEG:
+		return "JPEG (legacy)"
 	default:
-		return "JPEG"
+		return fmt.Sprintf("unknown (0x%02x)", id)
 	}
 }
 
@@ -39,8 +43,7 @@ func codecName(id byte) string {
 type Viewer struct {
 	cfg       *Config
 	decoder   codec.Decoder
-	h264Dec   *codec.H264Decoder // For raw H.264 streams (needs Start/Close)
-	tsDec     *codec.TSDecoder   // For MPEG-TS streams (needs Start/Close)
+	tsDec     *codec.TSDecoder // MPEG-TS decoder (needs Start/Close)
 	client    *client.ReadClient
 	namespace share.Namespace
 	height    uint64
@@ -290,7 +293,7 @@ func (v *Viewer) Run(ctx context.Context) error {
 				foundEntrypoint = true
 				log.Printf("Viewer: found entrypoint at height %d - sample rate: %d, channels: %d, fps: %d, codec: %s",
 					currentHeight, sampleRate, channels, fps, codecName(codecID))
-				if codecID == codec.CodecIDH264 || codecID == codec.CodecIDTS {
+				if codecID == codec.CodecIDTS {
 					log.Printf("Viewer: video dimensions: %dx%d", width, height)
 				}
 				break
@@ -305,33 +308,24 @@ func (v *Viewer) Run(ctx context.Context) error {
 		}
 	}
 
-	// Create decoder based on detected codec type
-	switch codecID {
-	case codec.CodecIDTS:
-		v.tsDec = codec.NewTSDecoder(codec.TSDecoderConfig{
-			Width:      width,
-			Height:     height,
-			SampleRate: sampleRate,
-			Channels:   channels,
-		})
-		if err := v.tsDec.Start(); err != nil {
-			return fmt.Errorf("failed to start TS decoder: %w", err)
-		}
-		defer v.tsDec.Close()
-		v.decoder = v.tsDec
-		log.Printf("Viewer: MPEG-TS decoder started")
-	case codec.CodecIDH264:
-		v.h264Dec = codec.NewH264Decoder(codec.H264DecoderConfig{Width: width, Height: height})
-		if err := v.h264Dec.Start(); err != nil {
-			return fmt.Errorf("failed to start H.264 decoder: %w", err)
-		}
-		defer v.h264Dec.Close()
-		v.decoder = v.h264Dec
-		log.Printf("Viewer: H.264 decoder started")
-	default:
-		v.decoder = codec.NewJPEGCodec(85)
-		log.Printf("Viewer: JPEG decoder initialized")
+	// MPEG-TS is the only supported wire format. Raw H.264 and JPEG
+	// entrypoints existed in pre-R1 captures; reject them with a clear
+	// error rather than silently fail to decode.
+	if codecID != codec.CodecIDTS {
+		return fmt.Errorf("unsupported entrypoint codec %d (%s); only MPEG-TS streams are decodable by this build", codecID, codecName(codecID))
 	}
+	v.tsDec = codec.NewTSDecoder(codec.TSDecoderConfig{
+		Width:      width,
+		Height:     height,
+		SampleRate: sampleRate,
+		Channels:   channels,
+	})
+	if err := v.tsDec.Start(); err != nil {
+		return fmt.Errorf("failed to start TS decoder: %w", err)
+	}
+	defer v.tsDec.Close()
+	v.decoder = v.tsDec
+	log.Printf("Viewer: MPEG-TS decoder started")
 
 	// Move to next height after entrypoint
 	currentHeight++
@@ -455,23 +449,11 @@ func (v *Viewer) Run(ctx context.Context) error {
 			continue
 		}
 
-		// FrameTypeNone: input bytes consumed but no inline decoded frame.
-		// Drain any frames the decoder has buffered, and pace each one.
+		// FrameTypeNone is unused by TSDecoder (the only decoder we
+		// support) — it always returns a populated frame or nil.
+		// Slide the buffer and move on if one shows up anyway.
 		if frame.Type == codec.FrameTypeNone {
 			frameBuffer = frameBuffer[consumed:]
-			if v.h264Dec != nil {
-				for _, videoFrame := range v.h264Dec.DrainFrames() {
-					if videoFrame == nil {
-						continue
-					}
-					esc := displayFrame(videoFrame)
-					videoFrame.Close()
-					videoFrameCount++
-					if esc {
-						return nil
-					}
-				}
-			}
 			continue
 		}
 
