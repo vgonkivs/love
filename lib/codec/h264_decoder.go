@@ -195,13 +195,20 @@ func (d *H264Decoder) DecodeH264Frame(h264Data []byte) (*gocv.Mat, error) {
 	d.spsMu.Lock()
 	switch nalType {
 	case nalTypeSPS:
-		d.sps = make([]byte, len(h264Data))
-		copy(d.sps, h264Data)
-		d.updateSpsPps()
+		// If the producer rotated parameters (encoder restart, resolution
+		// change), drop the primed flag so the next bare IDR re-prepends
+		// the fresh SPS/PPS instead of decoding against stale ones.
+		if !bytes.Equal(d.sps, h264Data) {
+			d.sps = append(d.sps[:0], h264Data...)
+			d.updateSpsPps()
+			d.hasSPS = false
+		}
 	case nalTypePPS:
-		d.pps = make([]byte, len(h264Data))
-		copy(d.pps, h264Data)
-		d.updateSpsPps()
+		if !bytes.Equal(d.pps, h264Data) {
+			d.pps = append(d.pps[:0], h264Data...)
+			d.updateSpsPps()
+			d.hasSPS = false
+		}
 	case nalTypeIDR:
 		// For IDR frames, prepend SPS/PPS if we have them and haven't sent them yet
 		if len(d.spsPps) > 0 && !d.hasSPS {

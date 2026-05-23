@@ -147,6 +147,72 @@ func TestH264Decoder_RequiresStart(t *testing.T) {
 	}
 }
 
+// TestH264Decoder_SPSReset verifies that a mid-stream SPS or PPS change
+// clears the primed flag so the next bare IDR re-prepends the fresh
+// parameter set. Without the reset, late-joiner IDRs would decode against
+// stale SPS/PPS after the producer restarted or changed resolution.
+func TestH264Decoder_SPSReset(t *testing.T) {
+	if !checkFFmpeg() {
+		t.Skip("ffmpeg not available")
+	}
+
+	dec := NewH264Decoder(H264DecoderConfig{Width: 640, Height: 480})
+	if err := dec.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer dec.Close()
+
+	sps1 := []byte{0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e}
+	sps2 := []byte{0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x28} // different payload
+	pps1 := []byte{0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x38, 0x80}
+	pps2 := []byte{0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x3c, 0x80}
+	idr := []byte{0x00, 0x00, 0x00, 0x01, 0x65, 0x00}
+
+	// Prime with first parameter set.
+	for _, nal := range [][]byte{sps1, pps1, idr} {
+		if _, err := dec.DecodeH264Frame(nal); err != nil {
+			t.Fatalf("priming: %v", err)
+		}
+	}
+	if !dec.hasSPS {
+		t.Fatal("hasSPS must be true after initial SPS+PPS+IDR")
+	}
+
+	// Re-sending identical SPS/PPS must NOT reset the latch (avoids
+	// re-prepending on every keyframe in well-behaved producers).
+	if _, err := dec.DecodeH264Frame(sps1); err != nil {
+		t.Fatalf("identical SPS: %v", err)
+	}
+	if _, err := dec.DecodeH264Frame(pps1); err != nil {
+		t.Fatalf("identical PPS: %v", err)
+	}
+	if !dec.hasSPS {
+		t.Fatal("identical SPS/PPS must not reset hasSPS")
+	}
+
+	// Changed SPS must reset the latch.
+	if _, err := dec.DecodeH264Frame(sps2); err != nil {
+		t.Fatalf("changed SPS: %v", err)
+	}
+	if dec.hasSPS {
+		t.Fatal("changed SPS must reset hasSPS so the next IDR re-prepends")
+	}
+
+	// Re-prime, then verify PPS change also resets.
+	if _, err := dec.DecodeH264Frame(idr); err != nil {
+		t.Fatalf("re-prime IDR: %v", err)
+	}
+	if !dec.hasSPS {
+		t.Fatal("hasSPS must re-arm after the next IDR")
+	}
+	if _, err := dec.DecodeH264Frame(pps2); err != nil {
+		t.Fatalf("changed PPS: %v", err)
+	}
+	if dec.hasSPS {
+		t.Fatal("changed PPS must reset hasSPS")
+	}
+}
+
 func TestH264_Entrypoint(t *testing.T) {
 	cfg := DefaultH264EncoderConfig(1280, 720, 30)
 	encoder := NewH264Encoder(cfg)
