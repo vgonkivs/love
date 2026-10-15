@@ -5,3 +5,7 @@
 # Binaries
 /love
 /chaintest
+
+# Local agent setup and audit notes (not published)
+/CLAUDE.md
+/STREAMING_ANALYSIS.md
